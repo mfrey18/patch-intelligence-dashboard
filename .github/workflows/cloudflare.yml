@@ -95,10 +95,25 @@ jobs:
       - name: Capture post-deploy D1 health and latency baseline
         env:
           INGEST_SECRET: ${{ secrets.INGEST_SECRET }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          health="$(curl --fail-with-body --silent --show-error -H "Authorization: Bearer $INGEST_SECRET" "$PUBLIC_API_BASE_URL/api/internal/health")"
-          echo "$health" | jq '{capturedAt,intelligenceWindowMonths,databaseBytes,largestTables,epssHistory,queryLatencyMs,slowestImportantQuery,baselineMaturity}'
-          echo "$health" | jq -e '.intelligenceWindowMonths == 6 and .databaseBytes > 0 and .rowCounts.ingestion_leases == 0 and (.queryLatencyMs.dashboard_api_default | type == "number") and .queryLatencyMs.dashboard_api_default < 5000'
+          health_file="$(mktemp)"
+          health_status="$(curl --silent --show-error --output "$health_file" --write-out '%{http_code}' -H "Authorization: Bearer $INGEST_SECRET" "$PUBLIC_API_BASE_URL/api/internal/health")"
+          jq . "$health_file"
+          test "$health_status" = "200"
+
+          d1_info="$(pnpm exec wrangler d1 info "$CLOUDFLARE_D1_DATABASE_NAME" --json --config dist/server/wrangler.json)"
+          database_bytes="$(echo "$d1_info" | jq -er '.database_size | tonumber | select(. > 0)')"
+          jq --argjson databaseBytes "$database_bytes" '(.rowCounts | to_entries | map(.value) | add) as $observedRows | .databaseBytes=$databaseBytes | .databaseSizeSource="wrangler_d1_info" | .projections |= map(.estimatedBytes = (if $observedRows > 0 then ((.estimatedRows * $databaseBytes / $observedRows) | round) else null end))' "$health_file" > d1-production-baseline.json
+          jq '{capturedAt,intelligenceWindowMonths,databaseBytes,databaseSizeSource,largestTables,epssHistory,queryLatencyMs,slowestImportantQuery,baselineMaturity}' d1-production-baseline.json
+          jq -e '.intelligenceWindowMonths == 6 and .databaseBytes > 0 and .databaseSizeSource == "wrangler_d1_info" and .rowCounts.ingestion_leases == 0 and (.queryLatencyMs.dashboard_api_default | type == "number") and .queryLatencyMs.dashboard_api_default < 5000' d1-production-baseline.json
+      - name: Archive D1 production baseline
+        uses: actions/upload-artifact@v4
+        with:
+          name: d1-production-baseline-${{ github.sha }}
+          path: d1-production-baseline.json
+          retention-days: 30
       - name: Record deployed Worker versions for rollback
         run: pnpm exec wrangler deployments list --config dist/server/wrangler.json
         env:

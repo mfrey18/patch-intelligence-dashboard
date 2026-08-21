@@ -1,6 +1,6 @@
 # Production Readiness Gate #1
 
-This gate controls whether PR #1 may be marked ready, merged, and published. It does not grant permission to merge or deploy. A PASS requires evidence; a FAIL requires correction before merge; a DEFER must be genuinely nonblocking and include a rationale.
+This gate controls whether the current release candidate may be marked ready, merged, and published. It does not grant permission to merge or deploy. A PASS requires evidence; a FAIL requires correction before merge; a DEFER must be genuinely nonblocking and include a rationale.
 
 ## Required deployment order
 
@@ -17,7 +17,7 @@ The workflows serialize production releases with the shared `production-deployme
 
 ## Pre-publish evidence checklist
 
-- [ ] Review the final PR #1 diff and commits; confirm no unrelated redesign or secret material.
+- [ ] Review the final release-candidate diff and commits; confirm no unrelated redesign or secret material.
 - [x] `pnpm exec tsc --noEmit`
 - [x] `pnpm lint`
 - [x] `pnpm run test:focused`
@@ -55,8 +55,8 @@ Alert on stale sources, repeated failures, abnormal discovered/changed counts, e
 
 ## Current gate record
 
-Rollback baseline captured 2026-08-21: active Worker version `de525b11-19fc-4360-94c9-a179f01d3b28`; production D1 ID `f908eb4e-eed5-4a09-afc2-ba090b09b42f`; database size 5,541,888 bytes. Remote migration inspection shows `0001_free_plan_six_month.sql` is pending. It was validated successfully against a disposable local database but was not applied to production.
+Production update captured 2026-08-21: PR #4 merged to `main` at `b625921aa22a8f33c8f94f11da3ee5d1402c3948`; the GitHub Actions deployment applied `0001_free_plan_six_month.sql` to D1 `f908eb4e-eed5-4a09-afc2-ba090b09b42f` and deployed active Worker preview/version `119cf8f8`. Public dashboard/API smoke tests, exact CORS, unauthenticated-ingestion rejection, and a bounded 12-item Microsoft delta all passed. The workflow then failed before Pages deployment because D1 returned `SQLITE_AUTH` for the health endpoint's `PRAGMA page_count` probe.
 
-PR #1 is open, draft, mergeable, and unmerged at head `160ed638b74f338752a4ab2bd93caec587d5f6d2` (3 commits, 87 changed files). The Free-plan/six-month hardening in the current working tree is newer than that PR head, so the final PR diff/commit review cannot be checked off until these changes are committed and pushed through the existing authorized workflow.
+Draft PR #5 at commit `87d1b61605cd5ee78373d6402cc3ba368934263e` removes the unsupported Worker PRAGMAs, obtains authoritative `database_size` through `wrangler d1 info --json`, and archives the combined baseline. Cloudflare's redundant direct Git integration for the stale `patch-intelligence-dashboard` Worker was disconnected; GitHub Actions remains the only production deployment owner for `patch-intelligence-api`.
 
-The gate remains **FAIL** until the pending migration and Worker are deployed through the ordered workflow and the new Microsoft checkpointed path completes a bounded production validation. Deferred vendor adapters without authoritative structured sources remain **DEFER** and do not justify weakening fail-closed behavior.
+The gate remains **FAIL** until PR #5 is reviewed, explicitly authorized for merge, and its ordered workflow records a passing D1 baseline and triggers a successful GitHub Pages deployment plus browser-to-Worker-to-D1 acceptance. Deferred adapters without authoritative structured sources remain **DEFER** and do not justify weakening fail-closed behavior.

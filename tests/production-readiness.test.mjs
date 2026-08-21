@@ -112,6 +112,8 @@ test("production workflows apply migrations before Worker deployment and seriali
   assert.ok(worker.indexOf("Deploy Worker and public assets") < worker.indexOf("Smoke-test Worker"));
   assert.match(worker, /group: production-deployment/);
   assert.match(worker, /environment:\s+name: production-worker/);
+  assert.match(worker, /wrangler d1 info .* --json/);
+  assert.match(worker, /actions\/upload-artifact@v4/);
   assert.match(pages, /workflow_run:/);
   assert.match(pages, /group: production-deployment/);
   assert.match(ingestion, /ENABLE_SCHEDULED_INGESTION == 'true'/);
@@ -120,7 +122,21 @@ test("production workflows apply migrations before Worker deployment and seriali
   assert.doesNotMatch(vite, /limits:\s*\{/, "Workers Free deployments must use platform limits rather than paid-plan runtime limits");
 });
 
+test("D1 health uses supported Worker SQL and deployment-owned size discovery", async () => {
+  const health = await readFile(new URL("../lib/operations/d1-health.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(health, /PRAGMA\s+(?:page_count|page_size)/i);
+  assert.match(health, /databaseSizeSource:\s*"wrangler_d1_info_required"/);
+  assert.match(health, /estimatedBytes:\s*null/);
+});
+
 test("production implementation no longer claims a 24-month scope", async () => {
   const files = ["../README.md", "../app/DashboardClient.tsx", "../lib/api/dashboard-query.ts", "../docs/github-pages-cloudflare.md"];
   for (const file of files) assert.doesNotMatch(await readFile(new URL(file, import.meta.url), "utf8"), /24[- ]month|24 months|-24 months/i, file);
+});
+
+test("gate documentation uses outcome-based release framing", async () => {
+  const gate = await readFile(new URL("../docs/production-readiness.md", import.meta.url), "utf8");
+  assert.doesNotMatch(gate, /mark PR #1 ready|PR #1 may be marked ready/i);
+  assert.match(gate, /PASS requires evidence/);
+  assert.match(gate, /FAIL.*until PR #5 is reviewed/s);
 });

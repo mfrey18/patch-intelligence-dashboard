@@ -32,6 +32,8 @@ Create or review the `production-worker` GitHub Actions environment. Scope Worke
 
 The Worker workflow owns production ordering: validation, resource checks, migration-state inspection, migration application, Worker deployment, and Worker smoke tests. A successful run on `main` triggers the Pages build/deployment, followed by the browser-to-Worker-to-D1 acceptance checks in the production runbook. If the final Worker URL is not known initially, deploy the Worker, set `PUBLIC_API_BASE_URL`, and manually rerun Pages only after the Worker smoke test succeeds.
 
+Keep Cloudflare's direct Git build/deploy integration disconnected for the production Worker. GitHub Actions is the single deployment owner; enabling Cloudflare push-triggered deploys would bypass migration ordering and the shared `production-deployment` concurrency gate.
+
 ## Optional vendor credentials
 
 Set Cisco and other private vendor credentials directly as Cloudflare Worker secrets, or extend the Cloudflare workflow's explicit `secrets` list. Never expose them as `VITE_*` variables because those values are compiled into the public Pages bundle.
