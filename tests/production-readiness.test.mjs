@@ -107,6 +107,7 @@ test("production workflows apply migrations before Worker deployment and seriali
   const worker = await readFile(new URL("../.github/workflows/cloudflare.yml", import.meta.url), "utf8");
   const pages = await readFile(new URL("../.github/workflows/pages.yml", import.meta.url), "utf8");
   const ingestion = await readFile(new URL("../.github/workflows/ingestion.yml", import.meta.url), "utf8");
+  const vite = await readFile(new URL("../vite.config.ts", import.meta.url), "utf8");
   assert.ok(worker.indexOf("d1 migrations apply") < worker.indexOf("Deploy Worker and public assets"));
   assert.ok(worker.indexOf("Deploy Worker and public assets") < worker.indexOf("Smoke-test Worker"));
   assert.match(worker, /group: production-deployment/);
@@ -116,6 +117,7 @@ test("production workflows apply migrations before Worker deployment and seriali
   assert.match(ingestion, /ENABLE_SCHEDULED_INGESTION == 'true'/);
   assert.match(ingestion, /fail-fast: false/);
   assert.doesNotMatch(ingestion, /sources:\s*\[[^\]]+,[^\]]+\]/, "each request must contain one source");
+  assert.doesNotMatch(vite, /limits:\s*\{/, "Workers Free deployments must use platform limits rather than paid-plan runtime limits");
 });
 
 test("production implementation no longer claims a 24-month scope", async () => {
