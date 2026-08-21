@@ -72,7 +72,7 @@ export function DashboardClient({ initialData, apiBaseUrl = "", cvePathPrefix = 
 
       <section className="hero" id="top">
         <div className="heroGlow" aria-hidden="true" />
-        <div className="heroCopy"><p className="eyebrow">Rolling 6 months · {formatDate(data.generatedAt)}</p><h1>See the threat.<br /><span>Know what changed.</span></h1><p>Authoritative vulnerability intelligence turns vendor advisories, exploitation evidence, CISA KEV, and EPSS into a clear operational picture.</p>
+        <div className="heroCopy"><p className="eyebrow">Rolling 6 months · {formatDate(data.generatedAt)}</p><h1 aria-label="Vulnerability Intelligence Dashboard: See the threat. Know what changed.">See the threat.<br /><span>Know what changed.</span></h1><p>Authoritative vulnerability intelligence turns vendor advisories, exploitation evidence, CISA KEV, and EPSS into a clear operational picture.</p>
           <div className="heroActions" aria-label="Intelligence lenses">
             <button type="button" aria-pressed={activeLens === "all"} onClick={() => applyLens("all")}><span>All intelligence</span><b>{data.metrics.total}</b></button>
             <button type="button" aria-pressed={activeLens === "urgent"} onClick={() => applyLens("urgent")}><span>Immediate attention</span><b>{data.priorityDistribution.P1}</b></button>
