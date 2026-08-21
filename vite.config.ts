@@ -38,7 +38,6 @@ const localBindingConfig = {
         },
       ]
     : [],
-  limits: { subrequests: 50 },
 };
 
 export default defineConfig(async () => {
