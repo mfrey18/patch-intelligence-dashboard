@@ -8,16 +8,18 @@ const { default: worker } = await import(workerUrl.href);
 const context = { waitUntil() {}, passThroughOnException() {} };
 const environment = { ASSETS: { fetch: async () => new Response("Not found", { status: 404 }) } };
 
-test("server-renders the operational dashboard without fabricated records", async () => {
+test("server-renders the vulnerability intelligence dashboard without fabricated records", async () => {
   const response = await worker.fetch(new Request("http://localhost/", { headers: { accept: "text/html" } }), environment, context);
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
   assert.equal(response.headers.get("x-frame-options"), "DENY");
   const html = await response.text();
-  assert.match(html, /<title>Patch Intelligence<\/title>/i);
-  assert.match(html, /What needs attention now/);
+  assert.match(html, /<title>Vulnerability Intelligence<\/title>/i);
+  assert.match(html, /Vulnerability Intelligence Dashboard/);
+  assert.match(html, /Total Vulnerabilities/);
   assert.match(html, /Since last refresh/);
-  assert.match(html, /Source health/);
+  assert.match(html, /Coverage &amp; Freshness/);
+  assert.doesNotMatch(html, /What needs attention now|Operational triage|Priority queue|>PI</);
   assert.doesNotMatch(html, /CVE-2026-\d{4,}/);
 });
 
@@ -32,4 +34,14 @@ test("public API fallback is read-only and internal ingestion is never cacheable
   const ingest = await worker.fetch(new Request("http://localhost/api/internal/ingest", { method: "POST", body: "{}", headers: { "content-type": "application/json" } }), environment, context);
   assert.equal(ingest.status, 503);
   assert.equal(ingest.headers.get("cache-control"), "no-store");
+});
+
+test("new intelligence routes render safe bounded states", async () => {
+  const invalidVendor = await worker.fetch(new Request("http://localhost/vendor/not-allowlisted", { headers: { accept: "text/html" } }), environment, context);
+  assert.equal(invalidVendor.status, 200);
+  assert.match(await invalidVendor.text(), /Vendor not found/);
+
+  const emptyComparison = await worker.fetch(new Request("http://localhost/compare", { headers: { accept: "text/html" } }), environment, context);
+  assert.equal(emptyComparison.status, 200);
+  assert.match(await emptyComparison.text(), /Choose two or three CVEs/);
 });

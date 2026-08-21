@@ -1,6 +1,7 @@
 import type { DashboardResponse, SourceHealth } from "./contracts";
 import type { DashboardVulnerabilityRow, NormalizedSeverity } from "../domain/types";
 import { calculatePriority, PRIORITY_THRESHOLDS } from "../domain/priority";
+import { EMERGING_CHANGE_WINDOW_DAYS, EPSS_MOVER_DATE_TOLERANCE_DAYS, EPSS_MOVER_LOOKBACK_DAYS, HIGH_EPSS_PERCENTILE, MIN_EPSS_PERCENTILE_DELTA, emergingReasons, intelligenceChangeCategory } from "../domain/intelligence";
 import { INTELLIGENCE_WINDOW_MONTHS } from "../ingestion/operational-policy";
 
 interface BaseRow {
@@ -24,10 +25,19 @@ export async function queryDashboard(db: D1Database, url: URL): Promise<Dashboar
 
   const severityRows = await db.prepare(`${cte} SELECT severity_rank, COUNT(*) value FROM filtered GROUP BY severity_rank ORDER BY severity_rank DESC`).bind(...bindings).all<{ severity_rank: number; value: number }>();
   const vendorRows = await db.prepare(`${cte} SELECT vendor, COUNT(*) value FROM filtered GROUP BY vendor ORDER BY value DESC LIMIT 12`).bind(...bindings).all<{ vendor: string; value: number }>();
+  const productSeries = await queryProductSeries(db, cte, bindings, params.get("vendor"));
   const changes = await queryChanges(db, cte, bindings);
   const recentChanges = await queryRecentChanges(db, cte, bindings);
   const sourceHealth = await querySourceHealth(db);
   const latestReleaseEvent = await queryLatestReleaseEvent(db);
+  const [activity, epssMovers, emergingVulnerabilities, vendorThreatSeries, changeCategoryCounts, cweAnalytics] = await Promise.all([
+    queryActivity(db, cte, bindings),
+    queryEpssMovers(db, cte, bindings),
+    queryEmergingVulnerabilities(db, cte, bindings),
+    queryVendorThreatSeries(db, cte, bindings),
+    queryChangeCategoryCounts(db, cte, bindings),
+    queryCweAnalytics(db, cte, bindings),
+  ]);
 
   return {
     generatedAt: new Date().toISOString(),
@@ -36,6 +46,14 @@ export async function queryDashboard(db: D1Database, url: URL): Promise<Dashboar
     priorityDistribution: { P1: p1, P2: p2, P3: Math.max(0, total - p1 - p2) },
     severitySeries: (severityRows.results ?? []).map((row) => ({ label: severityFromRank(row.severity_rank), value: Number(row.value) })),
     vendorSeries: (vendorRows.results ?? []).map((row) => ({ label: row.vendor, value: Number(row.value) })),
+    productSeries,
+    vulnerabilityActivity: activity.vulnerabilityActivity,
+    threatSignalActivity: activity.threatSignalActivity,
+    epssMovers,
+    emergingVulnerabilities,
+    vendorThreatSeries,
+    changeCategoryCounts,
+    cweAnalytics,
     rows,
     recentChanges,
     nextCursor: hasMore ? encodeCursor(offset + limit) : null,
@@ -47,6 +65,98 @@ export async function queryDashboard(db: D1Database, url: URL): Promise<Dashboar
 async function queryRecentChanges(db: D1Database, cte: string, bindings: unknown[]): Promise<DashboardResponse["recentChanges"]> {
   const result = await db.prepare(`${cte} SELECT ic.cve_id, ic.advisory_id, ic.change_type, ic.summary, ic.observed_at FROM intelligence_changes ic JOIN filtered f ON f.cve_id=ic.cve_id ORDER BY ic.observed_at DESC LIMIT 8`).bind(...bindings).all<Record<string, unknown>>();
   return (result.results ?? []).map((row) => ({ cveId: nullableString(row.cve_id), advisoryId: nullableString(row.advisory_id), changeType: String(row.change_type), summary: String(row.summary), observedAt: String(row.observed_at) }));
+}
+
+async function queryActivity(db: D1Database, cte: string, bindings: unknown[]): Promise<Pick<DashboardResponse, "vulnerabilityActivity" | "threatSignalActivity">> {
+  const result = await db.prepare(`${cte} SELECT substr(published_at,1,7) bucket,
+    COALESCE(SUM(severity_rank=4),0) critical, COALESCE(SUM(severity_rank=3),0) high, COALESCE(SUM(severity_rank=2),0) medium, COALESCE(SUM(severity_rank=1),0) low,
+    COALESCE(SUM(known_exploited),0) known_exploited, COALESCE(SUM(kev),0) kev, COALESCE(SUM(zero_day),0) zero_day, COALESCE(SUM(epss_percentile>=?),0) high_epss
+    FROM filtered WHERE published_at IS NOT NULL GROUP BY substr(published_at,1,7) ORDER BY bucket`).bind(...bindings, HIGH_EPSS_PERCENTILE).all<Record<string, unknown>>();
+  const observed = new Map((result.results ?? []).map((row) => [String(row.bucket), row]));
+  const buckets = rollingMonthBuckets(new Date());
+  return {
+    vulnerabilityActivity: buckets.map(({ bucket, label }) => { const row = observed.get(bucket); return { bucket, label, critical: Number(row?.critical ?? 0), high: Number(row?.high ?? 0), medium: Number(row?.medium ?? 0), low: Number(row?.low ?? 0) }; }),
+    threatSignalActivity: buckets.map(({ bucket, label }) => { const row = observed.get(bucket); return { bucket, label, knownExploited: Number(row?.known_exploited ?? 0), kev: Number(row?.kev ?? 0), zeroDay: Number(row?.zero_day ?? 0), highEpss: Number(row?.high_epss ?? 0) }; }),
+  };
+}
+
+async function queryEpssMovers(db: D1Database, cte: string, bindings: unknown[]): Promise<DashboardResponse["epssMovers"]> {
+  const result = await db.prepare(`${cte}, current_points AS (
+      SELECT eo.cve_id, eo.score_date, eo.score, eo.percentile, eo.model_version FROM epss_observations eo JOIN epss_datasets ed ON ed.score_date=eo.score_date AND ed.is_current=1 AND ed.status='published'
+    ), prior_dates AS (
+      SELECT cp.cve_id, (SELECT po.score_date FROM epss_observations po JOIN epss_datasets pd ON pd.score_date=po.score_date AND pd.status='published' WHERE po.cve_id=cp.cve_id AND po.score_date BETWEEN date(cp.score_date,?) AND date(cp.score_date,?) AND COALESCE(po.model_version,'')=COALESCE(cp.model_version,'') ORDER BY po.score_date DESC LIMIT 1) previous_score_date FROM current_points cp
+    )
+    SELECT f.cve_id, f.vendor, f.product, cp.score_date, cp.score, cp.percentile, cp.model_version, pd.previous_score_date, po.score previous_score, po.percentile previous_percentile
+    FROM filtered f JOIN current_points cp ON cp.cve_id=f.cve_id JOIN prior_dates pd ON pd.cve_id=cp.cve_id JOIN epss_observations po ON po.cve_id=cp.cve_id AND po.score_date=pd.previous_score_date
+    WHERE pd.previous_score_date IS NOT NULL AND cp.percentile-po.percentile>=?
+    ORDER BY cp.percentile-po.percentile DESC, cp.score-po.score DESC LIMIT 10`).bind(
+      ...bindings,
+      `-${EPSS_MOVER_LOOKBACK_DAYS + EPSS_MOVER_DATE_TOLERANCE_DAYS} days`,
+      `-${EPSS_MOVER_LOOKBACK_DAYS - EPSS_MOVER_DATE_TOLERANCE_DAYS} days`,
+      MIN_EPSS_PERCENTILE_DELTA,
+    ).all<Record<string, unknown>>();
+  return (result.results ?? []).map((row) => ({
+    cveId: String(row.cve_id), vendor: String(row.vendor), product: nullableString(row.product), previousScoreDate: String(row.previous_score_date), scoreDate: String(row.score_date),
+    previousScore: Number(row.previous_score), score: Number(row.score), previousPercentile: Number(row.previous_percentile), percentile: Number(row.percentile),
+    scoreDelta: Number(row.score) - Number(row.previous_score), percentileDelta: Number(row.percentile) - Number(row.previous_percentile), modelVersion: nullableString(row.model_version),
+  }));
+}
+
+async function queryEmergingVulnerabilities(db: D1Database, cte: string, bindings: unknown[]): Promise<DashboardResponse["emergingVulnerabilities"]> {
+  const recentSince = `-${EMERGING_CHANGE_WINDOW_DAYS} days`;
+  const result = await db.prepare(`${cte} SELECT f.*, GROUP_CONCAT(DISTINCT ic.change_type) recent_change_types, MAX(ic.observed_at) latest_change_at
+    FROM filtered f LEFT JOIN intelligence_changes ic ON ic.cve_id=f.cve_id AND ic.observed_at>=datetime('now',?)
+    WHERE EXISTS(SELECT 1 FROM intelligence_changes ec WHERE ec.cve_id=f.cve_id AND ec.observed_at>=datetime('now',?) AND ec.change_type IN ('EXPLOITATION_STATUS_CHANGED','ZERO_DAY_STATUS_CHANGED','KEV_ADDED','SEVERITY_CHANGED','CVSS_CHANGED'))
+      OR (f.severity_rank=4 AND f.epss_percentile>=?) OR (f.severity_rank=3 AND f.epss_percentile>=?)
+    GROUP BY f.cve_id ORDER BY f.known_exploited DESC, f.kev DESC, f.zero_day DESC, latest_change_at DESC, f.epss_percentile DESC LIMIT 12`).bind(...bindings, recentSince, recentSince, HIGH_EPSS_PERCENTILE, PRIORITY_THRESHOLDS.highVeryHighEpssPercentile).all<BaseRow & { recent_change_types: string | null; latest_change_at: string | null }>();
+  return (result.results ?? []).map((row) => {
+    const vulnerability = toDashboardRow(row);
+    const reasons = emergingReasons({ knownExploited: vulnerability.knownExploited, kev: vulnerability.kev, zeroDay: vulnerability.zeroDay, severity: vulnerability.severity, epssPercentile: vulnerability.epssPercentile, recentChangeTypes: row.recent_change_types?.split(",").filter(Boolean) ?? [] });
+    return { vulnerability, reasons, latestChangeAt: row.latest_change_at };
+  }).filter((item) => item.reasons.length > 0);
+}
+
+async function queryVendorThreatSeries(db: D1Database, cte: string, bindings: unknown[]): Promise<DashboardResponse["vendorThreatSeries"]> {
+  const result = await db.prepare(`${cte} SELECT v.name label, COUNT(DISTINCT f.cve_id) total,
+    COUNT(DISTINCT CASE WHEN f.known_exploited=1 THEN f.cve_id END) known_exploited,
+    COUNT(DISTINCT CASE WHEN f.kev=1 THEN f.cve_id END) kev,
+    COUNT(DISTINCT CASE WHEN f.zero_day=1 THEN f.cve_id END) zero_day,
+    COUNT(DISTINCT CASE WHEN f.epss_percentile>=? THEN f.cve_id END) high_epss
+    FROM filtered f JOIN advisory_cves vac ON vac.cve_id=f.cve_id JOIN advisories va ON va.id=vac.advisory_id JOIN vendors v ON v.id=va.vendor_id
+    GROUP BY v.id,v.name ORDER BY known_exploited DESC, kev DESC, high_epss DESC, total DESC LIMIT 12`).bind(...bindings, HIGH_EPSS_PERCENTILE).all<Record<string, unknown>>();
+  return (result.results ?? []).map((row) => ({ label: String(row.label), total: Number(row.total), knownExploited: Number(row.known_exploited), kev: Number(row.kev), zeroDay: Number(row.zero_day), highEpss: Number(row.high_epss) }));
+}
+
+async function queryProductSeries(db: D1Database, cte: string, bindings: unknown[], vendorId: string | null): Promise<DashboardResponse["productSeries"]> {
+  const result = await db.prepare(`${cte} SELECT COALESCE(p.family,p.name) label, COUNT(DISTINCT f.cve_id) value
+    FROM filtered f JOIN advisory_cves pac ON pac.cve_id=f.cve_id JOIN advisories pa ON pa.id=pac.advisory_id
+    JOIN advisory_revisions par ON par.id=(SELECT par2.id FROM advisory_revisions par2 WHERE par2.advisory_id=pa.id ORDER BY par2.observed_at DESC LIMIT 1)
+    JOIN affected_products pap ON pap.advisory_id=pa.id AND pap.advisory_revision_id=par.id AND (pap.cve_id=f.cve_id OR pap.cve_id IS NULL)
+    JOIN products p ON p.id=pap.product_id WHERE (?='' OR pa.vendor_id=?)
+    GROUP BY COALESCE(p.family,p.name) ORDER BY value DESC, label LIMIT 12`).bind(...bindings, vendorId ?? "", vendorId ?? "").all<{ label: string; value: number }>();
+  return (result.results ?? []).map((row) => ({ label: row.label, value: Number(row.value) }));
+}
+
+async function queryChangeCategoryCounts(db: D1Database, cte: string, bindings: unknown[]): Promise<DashboardResponse["changeCategoryCounts"]> {
+  const result = await db.prepare(`${cte} SELECT ic.change_type, COUNT(DISTINCT ic.id) value FROM intelligence_changes ic JOIN filtered f ON f.cve_id=ic.cve_id WHERE ic.observed_at>=datetime('now','-30 days') GROUP BY ic.change_type`).bind(...bindings).all<{ change_type: string; value: number }>();
+  const counts: DashboardResponse["changeCategoryCounts"] = { threat: 0, assessment: 0, advisory: 0, remediation: 0 };
+  for (const row of result.results ?? []) counts[intelligenceChangeCategory(row.change_type)] += Number(row.value);
+  return counts;
+}
+
+async function queryCweAnalytics(db: D1Database, cte: string, bindings: unknown[]): Promise<DashboardResponse["cweAnalytics"]> {
+  const coverage = await db.prepare(`${cte} SELECT COUNT(*) total, COALESCE(SUM(c.cwe IS NOT NULL AND trim(c.cwe)<>''),0) known FROM filtered f JOIN cves c ON c.id=f.cve_id`).bind(...bindings).first<Record<string, number>>();
+  const series = await db.prepare(`${cte} SELECT c.cwe label, COUNT(*) value, COALESCE(SUM(f.severity_rank=4),0) critical, COALESCE(SUM(f.known_exploited),0) exploited FROM filtered f JOIN cves c ON c.id=f.cve_id WHERE c.cwe IS NOT NULL AND trim(c.cwe)<>'' GROUP BY c.cwe ORDER BY value DESC LIMIT 10`).bind(...bindings).all<Record<string, unknown>>();
+  return { knownCoverage: Number(coverage?.known ?? 0), total: Number(coverage?.total ?? 0), series: (series.results ?? []).map((row) => ({ label: String(row.label), value: Number(row.value), critical: Number(row.critical), exploited: Number(row.exploited) })) };
+}
+
+function rollingMonthBuckets(now: Date): Array<{ bucket: string; label: string }> {
+  const values: Array<{ bucket: string; label: string }> = [];
+  for (let offset = 5; offset >= 0; offset -= 1) {
+    const date = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - offset, 1));
+    values.push({ bucket: date.toISOString().slice(0, 7), label: new Intl.DateTimeFormat("en", { month: "short", timeZone: "UTC" }).format(date) });
+  }
+  return values;
 }
 
 function buildFilteredCte(params: URLSearchParams): { cte: string; bindings: unknown[] } {

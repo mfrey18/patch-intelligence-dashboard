@@ -67,7 +67,7 @@ jobs:
           PAGE_URL: ${{ steps.deployment.outputs.page_url }}
         run: |
           for attempt in 1 2 3 4 5; do
-            if curl --fail --silent --show-error "$PAGE_URL" | grep -q 'Patch Intelligence'; then exit 0; fi
+            if curl --fail --silent --show-error "$PAGE_URL" | grep -q 'Vulnerability Intelligence'; then exit 0; fi
             sleep 5
           done
           exit 1

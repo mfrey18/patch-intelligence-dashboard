@@ -13,7 +13,7 @@
     "pages:build": "vite build --config static-dashboard/vite.config.mjs --configLoader native",
     "pages:preview": "vite preview --config static-dashboard/vite.config.mjs --configLoader native",
     "test": "vinext build && node --test --test-isolation=none tests/*.test.mjs",
-    "test:focused": "node --test --test-isolation=none tests/patch-intelligence-core.test.mjs tests/production-readiness.test.mjs tests/vendor-adapter-parsers.test.mjs tests/edge-security-vendor-adapters.test.mjs tests/mozilla-adapter.test.mjs tests/vendor-enterprise-adapters.test.mjs tests/source-registry.test.mjs tests/cors.test.mjs",
+    "test:focused": "node --test --test-isolation=none tests/patch-intelligence-core.test.mjs tests/vulnerability-intelligence-analytics.test.mjs tests/vulnerability-intelligence-routes.test.mjs tests/production-readiness.test.mjs tests/vendor-adapter-parsers.test.mjs tests/edge-security-vendor-adapters.test.mjs tests/mozilla-adapter.test.mjs tests/vendor-enterprise-adapters.test.mjs tests/source-registry.test.mjs tests/cors.test.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern dist-pages --ignore-pattern .next --ignore-pattern work",
     "db:generate": "drizzle-kit generate",
     "test:rendered": "node --test tests/rendered-html.test.mjs",

@@ -278,3 +278,13 @@ test("fixed-version, remediation, mitigation, and workaround changes are classif
     "WORKAROUND_ADDED",
   ]);
 });
+
+test("authoritative zero-day status changes are classified independently", () => {
+  const previous = makeAdvisory();
+  const current = cloneAdvisory(previous);
+  current.zeroDayStatus = "confirmed";
+  current.exploitEvidence.push({ cveId: "CVE-2026-1000", type: "zero_day", status: "confirmed", evidenceDate: "2026-08-21", evidenceUrl: current.sourceUrl, summary: "Vendor confirmed exploitation before public fix availability." });
+  const changes = diffAdvisory(previous, current);
+  assert.ok(changes.includes("ZERO_DAY_STATUS_CHANGED"));
+  assert.ok(changes.includes("ADVISORY_REVISED"));
+});
