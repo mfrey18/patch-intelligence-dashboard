@@ -46,8 +46,20 @@ export function DashboardClient({ initialData, apiBaseUrl = "", cvePathPrefix = 
     void load(search);
   };
 
+  const applyLens = (lens: "all" | "urgent" | "exploited" | "remediation") => {
+    const params = new URLSearchParams(window.location.search);
+    for (const key of ["priority", "exploited", "patchAvailable", "cursor"]) params.delete(key);
+    if (lens === "urgent") params.set("priority", "P1");
+    if (lens === "exploited") params.set("exploited", "true");
+    if (lens === "remediation") params.set("patchAvailable", "true");
+    const search = params.size ? `?${params}` : "";
+    window.history.pushState({}, "", `${window.location.pathname}${search}${window.location.hash}`);
+    void load(search);
+  };
+
   const sourceHealthy = data.sourceHealth.filter((source) => source.freshness === "fresh" && source.result !== "failed").length;
   const topPriority = data.rows.slice(0, 5);
+  const activeLens = filters.priority === "P1" ? "urgent" : filters.exploited === "true" ? "exploited" : filters.patchAvailable === "true" ? "remediation" : "all";
   const orderedChanges = useMemo(() => [...data.recentChanges].sort((a, b) => changeWeight(b.changeType) - changeWeight(a.changeType) || Date.parse(b.observedAt) - Date.parse(a.observedAt)), [data.recentChanges]);
 
   return (
@@ -59,8 +71,16 @@ export function DashboardClient({ initialData, apiBaseUrl = "", cvePathPrefix = 
       </header>
 
       <section className="hero" id="top">
-        <div><p className="eyebrow">Rolling 6 months · {formatDate(data.generatedAt)}</p><h1>Vulnerability Intelligence Dashboard</h1><p>Monitor vulnerability disclosures, exploitation activity, CISA KEV, EPSS, zero-days, and material advisory changes across enterprise vendors.</p></div>
-        <form className="search" onSubmit={(event) => { event.preventDefault(); setFilter("q", query); }}><span>⌕</span><input aria-label="Search CVE, vendor, or product" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search CVE, vendor, or product" /></form>
+        <div className="heroGlow" aria-hidden="true" />
+        <div className="heroCopy"><p className="eyebrow">Rolling 6 months · {formatDate(data.generatedAt)}</p><h1>See the threat.<br /><span>Know what changed.</span></h1><p>Authoritative vulnerability intelligence turns vendor advisories, exploitation evidence, CISA KEV, and EPSS into a clear operational picture.</p>
+          <div className="heroActions" aria-label="Intelligence lenses">
+            <button type="button" aria-pressed={activeLens === "all"} onClick={() => applyLens("all")}><span>All intelligence</span><b>{data.metrics.total}</b></button>
+            <button type="button" aria-pressed={activeLens === "urgent"} onClick={() => applyLens("urgent")}><span>Immediate attention</span><b>{data.priorityDistribution.P1}</b></button>
+            <button type="button" aria-pressed={activeLens === "exploited"} onClick={() => applyLens("exploited")}><span>Known exploited</span><b>{data.metrics.knownExploited}</b></button>
+            <button type="button" aria-pressed={activeLens === "remediation"} onClick={() => applyLens("remediation")}><span>Patch available</span><b>{data.metrics.patchAvailable}</b></button>
+          </div>
+        </div>
+        <div className="heroTools"><p>Search the intelligence record</p><form className="search" onSubmit={(event) => { event.preventDefault(); setFilter("q", query); }}><span aria-hidden="true">⌕</span><input aria-label="Search CVE, vendor, or product" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="CVE, vendor, or product" /><button type="submit">Search</button></form><small>{loading ? "Refreshing intelligence…" : `${sourceHealthy}/${data.sourceHealth.length || 4} sources fresh · updated ${timeAgo(data.generatedAt)}`}</small></div>
       </section>
 
       {error && <div className="notice" role="status">{error}</div>}
