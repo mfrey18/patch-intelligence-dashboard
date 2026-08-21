@@ -1,0 +1,16 @@
+# Copy to .dev.vars for local development; never commit the real value.
+INGEST_SECRET=replace-with-a-long-random-local-secret
+# Comma-separated exact origins allowed to read the public API from a static frontend.
+PUBLIC_DASHBOARD_ORIGINS=http://localhost:4173,https://YOUR-USERNAME.github.io
+# Cisco OpenVuln is optional but required when ingesting cisco-psirt-csaf.
+CISCO_CLIENT_ID=replace-with-cisco-api-client-id
+CISCO_CLIENT_SECRET=replace-with-cisco-api-client-secret
+# Optional vendor-provisioned machine-readable feeds. Public HTML is never scraped.
+ADOBE_SECURITY_INDEX_URL=
+ADOBE_SECURITY_AUTHORIZATION=
+FORTINET_CSAF_URL_TEMPLATE=
+FORTINET_CSAF_AUTHORIZATION=
+APPLE_CSAF_URLS=[]
+APPLE_CSAF_TOKEN=
+SAP_CSAF_URLS=[]
+SAP_CSAF_TOKEN=

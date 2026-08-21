@@ -1,0 +1,55 @@
+{
+  "name": "patch-intelligence-dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "dev": "vinext dev",
+    "build": "vinext build",
+    "start": "vinext start",
+    "pages:dev": "vite --config static-dashboard/vite.config.mjs --configLoader native",
+    "pages:build": "vite build --config static-dashboard/vite.config.mjs --configLoader native",
+    "pages:preview": "vite preview --config static-dashboard/vite.config.mjs --configLoader native",
+    "test": "vinext build && node --test --test-isolation=none tests/*.test.mjs",
+    "test:focused": "node --test --test-isolation=none tests/patch-intelligence-core.test.mjs tests/production-readiness.test.mjs tests/vendor-adapter-parsers.test.mjs tests/edge-security-vendor-adapters.test.mjs tests/mozilla-adapter.test.mjs tests/vendor-enterprise-adapters.test.mjs tests/source-registry.test.mjs tests/cors.test.mjs",
+    "lint": "eslint . --ignore-pattern dist --ignore-pattern dist-pages --ignore-pattern .next --ignore-pattern work",
+    "db:generate": "drizzle-kit generate",
+    "test:rendered": "node --test tests/rendered-html.test.mjs",
+    "test:pages": "node --test --test-isolation=none tests/pages-build.test.mjs"
+  },
+  "dependencies": {
+    "drizzle-orm": "0.45.2",
+    "react": "19.2.6",
+    "react-dom": "19.2.6",
+    "react-loading-skeleton": "3.5.0"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "1.37.1",
+    "@cloudflare/workers-types": "^5.20260819.1",
+    "@eslint/js": "9.39.4",
+    "@next/eslint-plugin-next": "16.2.6",
+    "@openai/sites-vite-plugin": "0.1.0",
+    "@tailwindcss/postcss": "4.2.1",
+    "@types/node": "22.19.19",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "6.0.2",
+    "@vitejs/plugin-rsc": "0.5.26",
+    "drizzle-kit": "0.31.10",
+    "eslint": "9.39.4",
+    "eslint-plugin-jsx-a11y": "6.10.2",
+    "eslint-plugin-react": "7.37.5",
+    "eslint-plugin-react-hooks": "7.1.1",
+    "globals": "16.4.0",
+    "react-server-dom-webpack": "19.2.6",
+    "tailwindcss": "4.2.1",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.59.3",
+    "vinext": "1.0.0-beta.2",
+    "vite": "8.0.13",
+    "wrangler": "4.92.0"
+  },
+  "type": "module"
+}
