@@ -60,7 +60,8 @@ jobs:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           packageManager: pnpm
-          command: deploy --config dist/server/wrangler.json
+          workingDirectory: dist/server
+          command: deploy --config wrangler.json
           secrets: |
             INGEST_SECRET
         env:
