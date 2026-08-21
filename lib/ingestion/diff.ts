@@ -9,6 +9,7 @@ export function diffAdvisory(previous: NormalizedAdvisory | null, current: Norma
   if (previous.vendorSeverity !== current.vendorSeverity || perCveFieldChanged(previous, current, "vendorSeverity")) changes.push("SEVERITY_CHANGED");
   if (previous.cvssScore !== current.cvssScore || perCveFieldChanged(previous, current, "cvssScore") || perCveFieldChanged(previous, current, "cvssVector")) changes.push("CVSS_CHANGED");
   if (previous.exploitationStatus !== current.exploitationStatus || stableSerialize(previous.exploitEvidence) !== stableSerialize(current.exploitEvidence)) changes.push("EXPLOITATION_STATUS_CHANGED");
+  if (previous.zeroDayStatus !== current.zeroDayStatus || zeroDayEvidence(previous) !== zeroDayEvidence(current)) changes.push("ZERO_DAY_STATUS_CHANGED");
 
   const previousProducts = keyed(previous.affectedProducts, productKey);
   const currentProducts = keyed(current.affectedProducts, productKey);
@@ -32,4 +33,5 @@ function productKey(value: NormalizedAdvisory["affectedProducts"][number]): stri
 function keyed<T>(values: T[], key: (value: T) => string): Map<string, T> { return new Map(values.map((value) => [key(value), value])); }
 function fixedVersions(value: NormalizedAdvisory): string { return stableSerialize(value.remediations.map((item) => item.fixedVersion).filter(Boolean).sort()); }
 function hasKind(value: NormalizedAdvisory, kind: "mitigation" | "workaround"): boolean { return value.remediations.some((item) => item.kind === kind); }
+function zeroDayEvidence(value: NormalizedAdvisory): string { return stableSerialize(value.exploitEvidence.filter((item) => item.type === "zero_day")); }
 function unique<T>(value: T, index: number, all: T[]): boolean { return all.indexOf(value) === index; }

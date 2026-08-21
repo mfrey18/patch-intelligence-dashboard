@@ -1,6 +1,6 @@
-# Patch Intelligence Dashboard
+# Vulnerability Intelligence Dashboard
 
-A Cloudflare-compatible operational patch-intelligence system built with vinext, React, D1, and Drizzle. It keeps canonical CVE identity separate from vendor assertions and preserves advisory revisions, structured remediation, authoritative exploitation evidence, CISA KEV state, and daily FIRST EPSS observations.
+A Cloudflare-compatible vulnerability-intelligence system built with vinext, React, D1, and Drizzle. It monitors cross-vendor vulnerability disclosures, threat evidence, CISA KEV, EPSS, zero-days, and material advisory changes while keeping canonical CVE identity separate from vendor assertions. Structured remediation remains available as supporting CVE context.
 
 The repository also includes a static GitHub Pages client. It reuses the dashboard and CVE-detail components while calling the Cloudflare-hosted read-only API. D1, vendor credentials, and ingestion remain exclusively on Cloudflare.
 
@@ -11,10 +11,29 @@ The repository also includes a static GitHub Pages client. It reuses the dashboa
 - CISA KEV full-snapshot synchronization with soft lifecycle changes
 - FIRST EPSS bulk daily synchronization with history and model metadata
 - Shared `DISCOVER -> FETCH -> VALIDATE -> NORMALIZE -> DIFF -> UPSERT -> ENRICH -> PUBLISH` contracts and policies
-- Explainable P1/P2/P3 operational priority
-- Patch Tuesday release events and comparison with the prior event
+- Explainable P1/P2/P3 intelligence priority
+- Reusable vendor release-event intelligence, including Microsoft Patch Tuesday comparison
 - Filtered/cursor-paginated dashboard API and complete CVE intelligence API
 - Public read-only dashboard plus protected, allowlisted internal ingestion
+
+## Vulnerability-intelligence surfaces
+
+The public hierarchy is vulnerability-first: six primary KPIs (total, Critical, High, known exploited, CISA KEV, and zero-days), a compact since-last-refresh strip, explainable P1/P2/P3 prioritization, and threat-first revision changes. Remediation and patch state are still retained and filterable, but appear as supporting CVE/advisory context rather than the product identity.
+
+Dashboard analytics are computed in D1 against the active filtered six-month set:
+
+- monthly disclosure activity by severity;
+- monthly known-exploited, KEV, zero-day, and high-EPSS observations;
+- same-model EPSS percentile movers over a seven-day window with one-day tolerance;
+- emerging vulnerabilities with human-readable inclusion reasons;
+- observed threat-signal counts by vendor;
+- change-category counters and explicit canonical-CWE coverage.
+
+`High EPSS` means a current FIRST EPSS percentile of at least 0.90. It is predictive enrichment and never creates exploitation or zero-day evidence. EPSS movers require a published current dataset, a same-model observation six to eight days earlier, and at least a five-percentile-point increase.
+
+The Next/Worker application exposes `/vendor/[vendor]` and `/compare?cves=CVE-...,CVE-...`. The GitHub Pages client provides the same views through `#/vendor/[vendor]` and `#/compare/CVE-...,CVE-...`. Comparison accepts two or three unique, valid CVE identifiers and remains read-only and URL-shareable. Dashboard filter URLs can be copied directly with the `Copy view URL` action.
+
+Product-scoped routes are intentionally deferred. The current affected-product records preserve authoritative names and source identifiers, but not every source provides a stable, vendor-scoped canonical product slug. The route helper therefore fails closed until that identity contract exists; it does not create permanent URLs from loosely normalized display names.
 
 Additional adapters use the same contracts: Palo Alto Networks, Ivanti, Mozilla, Oracle, and Atlassian have verified public machine-readable discovery. Adobe, Fortinet, Apple, and SAP are fail-closed configuration adapters for official vendor/customer feeds; they never fall back to HTML scraping.
 
@@ -67,11 +86,11 @@ VITE_API_BASE_URL=https://api.example.workers.dev PAGES_BASE_PATH=/repository-na
 pnpm run test:pages
 ```
 
-The focused suites cover normalized adapter fixtures, hashing and revision diffs, canonical/vendor separation rules, remediation and exploitation semantics, KEV validation, EPSS metadata/history, and explainable priority boundaries.
+The focused suites cover normalized adapter fixtures, hashing and revision diffs, canonical/vendor separation rules, remediation and exploitation semantics, KEV validation, EPSS metadata/history, explainable priority boundaries, analytics thresholds, same-model EPSS mover guards, emerging-inclusion reasons, and safe vendor/comparison routes.
 
 ## API
 
-- `GET /api/dashboard` — filtered summary, since-refresh changes, priority distribution, chart data, release event comparison, source health, and cursor-paginated rows. Filter state is URL-native.
+- `GET /api/dashboard` — filtered vulnerability summary, intelligence changes, priority distribution, activity/threat/vendor/product/CWE analytics, EPSS movers, release-event context, coverage/freshness, and cursor-paginated rows. Filter state is URL-native.
 - `GET /api/cves/:id` — canonical CVE data, vendor assertions, affected products, remediation, exploitation evidence, KEV, EPSS current/history, timeline, and source links.
 - `POST /api/internal/ingest` — bearer-protected, idempotent, source-allowlisted ingestion with bounded request size and per-source leases.
 - `GET /api/internal/health` — bearer-protected D1 size, row/index inventory, EPSS growth, representative query latency, and directional capacity projections.
