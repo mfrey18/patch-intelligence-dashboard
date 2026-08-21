@@ -133,3 +133,10 @@ test("production implementation no longer claims a 24-month scope", async () => 
   const files = ["../README.md", "../app/DashboardClient.tsx", "../lib/api/dashboard-query.ts", "../docs/github-pages-cloudflare.md"];
   for (const file of files) assert.doesNotMatch(await readFile(new URL(file, import.meta.url), "utf8"), /24[- ]month|24 months|-24 months/i, file);
 });
+
+test("gate documentation uses outcome-based release framing", async () => {
+  const gate = await readFile(new URL("../docs/production-readiness.md", import.meta.url), "utf8");
+  assert.doesNotMatch(gate, /mark PR #1 ready|PR #1 may be marked ready/i);
+  assert.match(gate, /PASS requires evidence/);
+  assert.match(gate, /FAIL.*until PR #5 is reviewed/s);
+});
