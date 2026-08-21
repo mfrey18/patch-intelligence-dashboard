@@ -1,5 +1,6 @@
 import type { NormalizedAdvisory } from "../../domain/types";
 import type { AdvisoryRef, RawAdvisory, SourcePolicy, VendorAdapter } from "../contracts";
+import { defaultDiscoveryStart } from "../operational-policy";
 import { fetchWithPolicy, readJsonLimited } from "../safety";
 import { list, record, stringValue } from "./utils";
 import { normalizeCsaf } from "./csaf";
@@ -28,7 +29,7 @@ export function createCiscoAdapter(credentials: CiscoCredentials = {}): VendorAd
     sourceId: "cisco-psirt-csaf",
     async discover(ctx) {
       const token = await accessToken(ctx.policy);
-      const start = new Date(ctx.since ?? Date.now() - 730 * 24 * 60 * 60 * 1000);
+      const start = defaultDiscoveryStart(ctx.since);
       const end = new Date(ctx.until ?? Date.now());
       const refs = new Map<string, AdvisoryRef>();
       for (const window of dateWindows(start, end, 31)) {

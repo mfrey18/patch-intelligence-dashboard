@@ -46,9 +46,11 @@ export async function streamEpssCsv(stream: ReadableStream<Uint8Array>, onRow: (
 export async function ingestEpssBulk(db: D1Database, idempotencyKey?: string, options: { url?: string; expectedDate?: string; minimumRows?: number } = {}): Promise<IngestResult> {
   const repository = new D1IngestionRepository(db);
   const startedAt = new Date().toISOString();
-  const { runId, reused } = await repository.beginRun("first-epss", idempotencyKey);
+  const metadata = { mode: "delta" as const, maxItems: 1 };
+  const { runId, reused } = await repository.beginRun("first-epss", idempotencyKey, metadata);
   const counts = { discovered: 0, inserted: 0, changed: 0, unchanged: 0, failed: 0 };
-  if (reused) return { sourceId: "first-epss", runId, status: "unchanged", counts, errors: [], startedAt, completedAt: new Date().toISOString() };
+  const runFields = { mode: metadata.mode, window: {}, processed: 1, continuation: null, boundHit: false };
+  if (reused) return { sourceId: "first-epss", runId, status: "unchanged", ...runFields, processed: 0, counts, errors: [], startedAt, completedAt: new Date().toISOString() };
   const url = options.url ?? EPSS_CURRENT_URL;
   try {
     const response = await fetchWithPolicy(url, { timeoutMs: 60_000, maxResponseBytes: 50_000_000, retries: 2, retryBaseMs: 500 });
@@ -82,13 +84,13 @@ export async function ingestEpssBulk(db: D1Database, idempotencyKey?: string, op
     counts.discovered = parsed.rowCount; counts.inserted = matched;
     await db.prepare("UPDATE source_runs SET dataset_date=?, source_hash=? WHERE id=?").bind(scoreDate, sourceHash, runId).run();
     const status = latest?.score_date === scoreDate ? "unchanged" : "success";
-    await repository.finishRun(runId, { status, counts, errors: [] });
-    return { sourceId: "first-epss", runId, status, counts, errors: [], startedAt, completedAt: new Date().toISOString() };
+    await repository.finishRun(runId, { status, ...runFields, counts, errors: [] });
+    return { sourceId: "first-epss", runId, status, ...runFields, counts, errors: [], startedAt, completedAt: new Date().toISOString() };
   } catch (error) {
     const message = error instanceof Error ? error.message : "EPSS ingestion failed";
     counts.failed = 1;
-    await repository.finishRun(runId, { status: "failed", counts, errors: [message] });
-    return { sourceId: "first-epss", runId, status: "failed", counts, errors: [message], startedAt, completedAt: new Date().toISOString() };
+    await repository.finishRun(runId, { status: "failed", ...runFields, counts, errors: [message] });
+    return { sourceId: "first-epss", runId, status: "failed", ...runFields, counts, errors: [message], startedAt, completedAt: new Date().toISOString() };
   }
 }
 

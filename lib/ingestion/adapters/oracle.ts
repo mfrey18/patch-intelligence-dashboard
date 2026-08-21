@@ -1,5 +1,6 @@
 import type { NormalizedAdvisory } from "../../domain/types";
 import type { AdvisoryRef, RawAdvisory, VendorAdapter } from "../contracts";
+import { defaultDiscoveryStart } from "../operational-policy";
 import { fetchWithPolicy, readJsonLimited } from "../safety";
 import { normalizeCsaf } from "./csaf";
 
@@ -11,7 +12,7 @@ export const oracleAdapter: VendorAdapter = {
   vendor: "oracle",
   sourceId: "oracle-cpu-csaf",
   async discover(ctx) {
-    const since = new Date(ctx.since ?? Date.now() - 730 * 86_400_000);
+    const since = defaultDiscoveryStart(ctx.since);
     const until = new Date(ctx.until ?? Date.now());
     const refs: AdvisoryRef[] = [];
     for (const ref of oracleCpuCandidates(since, until)) {

@@ -2,7 +2,7 @@ import type { DashboardVulnerabilityRow, PriorityResult } from "../domain/types"
 
 export interface DashboardMetrics { total: number; critical: number; high: number; knownExploited: number; kev: number; zeroDay: number; patchAvailable: number; }
 export interface ChangeMetrics { since: string | null; newCves: number; newCritical: number; newlyKnownExploited: number; newKev: number; revisedAdvisories: number; newRemediation: number; }
-export interface SourceHealth { sourceId: string; name: string; lastAttempt: string | null; lastSuccess: string | null; durationMs: number | null; result: string | null; discovered: number; inserted: number; changed: number; unchanged: number; failed: number; errorSummary: string | null; }
+export interface SourceHealth { sourceId: string; name: string; lastAttempt: string | null; lastSuccess: string | null; lastFailure: string | null; durationMs: number | null; result: string | null; mode: string | null; freshness: "fresh" | "stale" | "never"; discovered: number; inserted: number; changed: number; unchanged: number; failed: number; boundHit: boolean; errorSummary: string | null; lease: { active: boolean; expiresAt: string | null }; checkpoint: { id: string; status: string; windowStart: string; windowEnd: string } | null; }
 export interface DashboardResponse {
   generatedAt: string;
   metrics: DashboardMetrics;
@@ -21,12 +21,12 @@ export interface DashboardResponse {
 export interface CveDetailResponse {
   canonical: { cveId: string; description: string | null; cwe: string | null; cvss: number | null; cvssVector: string | null; publishedAt: string | null; modifiedAt: string | null; sourceUrl: string | null };
   priority: PriorityResult;
-  advisories: Array<{ id: string; vendor: string; vendorAdvisoryId: string; title: string; sourceUrl: string; vendorSeverity: string | null; normalizedSeverity: string; vendorCvss: number | null; vendorCvssVector: string | null; publishedAt: string | null; modifiedAt: string | null }>;
-  affectedProducts: Array<{ vendor: string; product: string; affectedVersion: string | null; fixedVersion: string | null; status: string; sourceProductId: string | null }>;
-  remediations: Array<{ vendor: string; kind: string; patchAvailable: boolean | null; fixedVersion: string | null; action: string | null; rebootRequired: boolean | null; superseded: boolean | null; sourceUrl: string; publishedAt: string | null; updatedAt: string | null }>;
-  exploitation: { knownExploited: boolean; zeroDay: boolean; evidence: Array<{ type: string; status: string; date: string | null; url: string; summary: string | null; source: string }> };
-  kev: { active: boolean; dateAdded: string; dueDate: string | null; requiredAction: string | null; sourceUrl: string } | null;
-  epss: { current: { scoreDate: string; score: number; percentile: number; modelVersion: string | null } | null; history: Array<{ scoreDate: string; score: number; percentile: number; modelVersion: string | null }> };
+  advisories: Array<{ id: string; sourceId: string; observedAt: string; vendor: string; vendorAdvisoryId: string; title: string; sourceUrl: string; vendorSeverity: string | null; normalizedSeverity: string; vendorCvss: number | null; vendorCvssVector: string | null; publishedAt: string | null; modifiedAt: string | null }>;
+  affectedProducts: Array<{ advisoryId: string; sourceId: string; vendor: string; product: string; affectedVersion: string | null; fixedVersion: string | null; status: string; sourceProductId: string | null; sourceUrl: string; observedAt: string }>;
+  remediations: Array<{ advisoryId: string; sourceId: string; observedAt: string; vendor: string; kind: string; patchAvailable: boolean | null; fixedVersion: string | null; action: string | null; rebootRequired: boolean | null; superseded: boolean | null; sourceUrl: string; publishedAt: string | null; updatedAt: string | null }>;
+  exploitation: { knownExploited: boolean; zeroDay: boolean; evidence: Array<{ type: string; status: string; date: string | null; url: string; summary: string | null; source: string; sourceId: string; observedAt: string }> };
+  kev: { active: boolean; dateAdded: string; dueDate: string | null; requiredAction: string | null; sourceUrl: string; sourceId: "cisa-kev"; observedAt: string } | null;
+  epss: { current: { scoreDate: string; score: number; percentile: number; modelVersion: string | null; sourceId: "first-epss"; sourceUrl: string; observedAt: string } | null; history: Array<{ scoreDate: string; score: number; percentile: number; modelVersion: string | null; sourceId: "first-epss"; sourceUrl: string; observedAt: string }> };
   timeline: Array<{ observedAt: string; changeType: string; summary: string; sourceRunId: string }>;
   sourceLinks: Array<{ label: string; url: string }>;
 }

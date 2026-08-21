@@ -46,6 +46,7 @@ test("priority is explainable and keeps KEV and known exploitation independently
       "CVSS 9.8",
       "EPSS 97th percentile",
     ],
+    components: { kev: true, exploitationStatus: "known_exploited", severity: "critical", cvss: 9.8, epssPercentile: 0.97 },
   });
 
   assert.equal(
@@ -94,7 +95,7 @@ test("routine priority still provides a human-readable reason", () => {
       exploitationStatus: "unknown",
       severity: "unknown",
     }),
-    { level: "P3", reasons: ["Routine vendor advisory"] },
+    { level: "P3", reasons: ["Routine vendor advisory"], components: { kev: false, exploitationStatus: "unknown", severity: "unknown", cvss: null, epssPercentile: null } },
   );
 });
 

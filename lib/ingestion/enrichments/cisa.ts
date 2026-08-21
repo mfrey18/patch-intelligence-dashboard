@@ -36,9 +36,11 @@ export function parseCisaKevSnapshot(payload: unknown, sourceUrl = CISA_KEV_URL)
 export async function ingestCisaKev(db: D1Database, idempotencyKey?: string): Promise<IngestResult> {
   const repository = new D1IngestionRepository(db);
   const startedAt = new Date().toISOString();
-  const { runId, reused } = await repository.beginRun("cisa-kev", idempotencyKey);
+  const metadata = { mode: "delta" as const, maxItems: 1 };
+  const { runId, reused } = await repository.beginRun("cisa-kev", idempotencyKey, metadata);
   const empty = { discovered: 0, inserted: 0, changed: 0, unchanged: 0, failed: 0 };
-  if (reused) return { sourceId: "cisa-kev", runId, status: "unchanged", counts: empty, errors: [], startedAt, completedAt: new Date().toISOString() };
+  const runFields = { mode: metadata.mode, window: {}, processed: 1, continuation: null, boundHit: false };
+  if (reused) return { sourceId: "cisa-kev", runId, status: "unchanged", ...runFields, processed: 0, counts: empty, errors: [], startedAt, completedAt: new Date().toISOString() };
   try {
     let response: Response;
     let sourceUrl = CISA_KEV_URL;
@@ -76,13 +78,13 @@ export async function ingestCisaKev(db: D1Database, idempotencyKey?: string): Pr
     const snapshotHash = await sha256(stableSerialize(snapshot.entries));
     await db.prepare("UPDATE source_runs SET dataset_date=?, source_hash=? WHERE id=?").bind(snapshot.dateReleased, snapshotHash, runId).run();
     const status = counts.inserted + counts.changed > 0 ? "success" : "unchanged";
-    await repository.finishRun(runId, { status, counts, errors: [] });
-    return { sourceId: "cisa-kev", runId, status, counts, errors: [], startedAt, completedAt: new Date().toISOString() };
+    await repository.finishRun(runId, { status, ...runFields, counts, errors: [] });
+    return { sourceId: "cisa-kev", runId, status, ...runFields, counts, errors: [], startedAt, completedAt: new Date().toISOString() };
   } catch (error) {
     const message = error instanceof Error ? error.message : "CISA KEV ingestion failed";
     const counts = { ...empty, failed: 1 };
-    await repository.finishRun(runId, { status: "failed", counts, errors: [message] });
-    return { sourceId: "cisa-kev", runId, status: "failed", counts, errors: [message], startedAt, completedAt: new Date().toISOString() };
+    await repository.finishRun(runId, { status: "failed", ...runFields, counts, errors: [message] });
+    return { sourceId: "cisa-kev", runId, status: "failed", ...runFields, counts, errors: [message], startedAt, completedAt: new Date().toISOString() };
   }
 }
 

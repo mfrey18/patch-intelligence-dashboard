@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { DashboardResponse } from "../lib/api/contracts";
 
 export function DashboardClient({ initialData, apiBaseUrl = "", cvePathPrefix = "/cve/" }: { initialData: DashboardResponse; apiBaseUrl?: string; cvePathPrefix?: string }) {
@@ -41,8 +41,8 @@ export function DashboardClient({ initialData, apiBaseUrl = "", cvePathPrefix = 
     void load(search);
   };
 
-  const sourceHealthy = data.sourceHealth.filter((source) => source.result && source.result !== "failed").length;
-  const topPriority = useMemo(() => data.rows.slice(0, 5), [data.rows]);
+  const sourceHealthy = data.sourceHealth.filter((source) => source.freshness === "fresh" && source.result !== "failed").length;
+  const topPriority = data.rows.slice(0, 5);
   const changeLabels: Record<string, string> = { KEV_ADDED: "KEV added", FIXED_VERSION_CHANGED: "Fixed version", SEVERITY_CHANGED: "Severity changed", WORKAROUND_ADDED: "Workaround added", MITIGATION_ADDED: "Mitigation added", EXPLOITATION_STATUS_CHANGED: "Exploitation changed", ADVISORY_REVISED: "Advisory revised", REMEDIATION_CHANGED: "Remediation changed" };
 
   return (
@@ -54,7 +54,7 @@ export function DashboardClient({ initialData, apiBaseUrl = "", cvePathPrefix = 
       </header>
 
       <section className="hero" id="top">
-        <div><p className="eyebrow">Rolling 24 months · {formatDate(data.generatedAt)}</p><h1>What needs attention now</h1><p>A prioritized view of new vulnerabilities, advisory revisions, exploitation evidence, and available remediation.</p></div>
+        <div><p className="eyebrow">Rolling 6 months · {formatDate(data.generatedAt)}</p><h1>What needs attention now</h1><p>A prioritized view of new vulnerabilities, advisory revisions, exploitation evidence, and available remediation.</p></div>
         <form className="search" onSubmit={(event) => { event.preventDefault(); setFilter("q", query); }}><span>⌕</span><input aria-label="Search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search CVE, vendor, or product" /></form>
       </section>
 
@@ -102,7 +102,7 @@ export function DashboardClient({ initialData, apiBaseUrl = "", cvePathPrefix = 
         {data.nextCursor && <button className="loadMore" type="button" onClick={() => setFilter("cursor", data.nextCursor!)}>Load more vulnerabilities</button>}
       </section>
 
-      <section className="panel sourcePanel" id="sources"><div className="panelHead"><div><p className="eyebrow">Ingestion operations</p><h2>Source health</h2></div></div><div className="sourceGrid">{data.sourceHealth.map((source) => <article key={source.sourceId}><span className={`sourceState ${source.result === "failed" ? "failed" : ""}`} /><div><strong>{source.name}</strong><small>{source.result ?? "Not run"} · {source.lastSuccess ? `last success ${timeAgo(source.lastSuccess)}` : "awaiting first run"}</small></div><dl><div><dt>Discovered</dt><dd>{source.discovered}</dd></div><div><dt>Changed</dt><dd>{source.changed}</dd></div><div><dt>Failed</dt><dd>{source.failed}</dd></div></dl>{source.errorSummary && <p>{source.errorSummary}</p>}</article>)}</div></section>
+      <section className="panel sourcePanel" id="sources"><div className="panelHead"><div><p className="eyebrow">Ingestion operations</p><h2>Source health</h2></div></div><div className="sourceGrid">{data.sourceHealth.map((source) => <article key={source.sourceId}><span className={`sourceState ${source.result === "failed" || source.freshness === "stale" ? "failed" : ""}`} /><div><strong>{source.name}</strong><small>{source.result ?? "Not run"}{source.mode ? ` · ${source.mode}` : ""}{source.lastAttempt ? ` · attempted ${timeAgo(source.lastAttempt)}` : ""} · {source.lastSuccess ? `last success ${timeAgo(source.lastSuccess)}` : "awaiting first run"}{source.durationMs != null ? ` · ${source.durationMs} ms` : ""}</small></div><dl><div><dt>Discovered</dt><dd>{source.discovered}</dd></div><div><dt>Inserted</dt><dd>{source.inserted}</dd></div><div><dt>Changed</dt><dd>{source.changed}</dd></div><div><dt>Unchanged</dt><dd>{source.unchanged}</dd></div><div><dt>Failed</dt><dd>{source.failed}</dd></div></dl>{source.lastFailure && <p>Last failed attempt {timeAgo(source.lastFailure)}.</p>}{source.boundHit && <p>Configured Free-plan batch bound reached; continuation is preserved.</p>}{source.lease.active && <p>Ingestion lease active until {formatDateTime(source.lease.expiresAt!)}</p>}{source.checkpoint && <p>{titleCase(source.checkpoint.status)} checkpoint · {formatDate(source.checkpoint.windowStart)} through {formatDate(source.checkpoint.windowEnd)}</p>}{source.errorSummary && <p>{source.errorSummary}</p>}</article>)}</div></section>
     </main>
   );
 }

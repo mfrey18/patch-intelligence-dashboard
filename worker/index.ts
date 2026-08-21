@@ -6,11 +6,14 @@ import { queryCveDetail } from "../lib/api/cve-query";
 import { demoDashboard } from "../lib/demo-data";
 import { D1IngestionRepository, seedIngestionCatalog } from "../lib/ingestion/d1-repository";
 import { ingestionBatchOutcome, runVendorAdapter } from "../lib/ingestion/pipeline";
-import { createVendorAdapter, defaultSourceIds, SOURCE_IDS, type AdapterEnvironment } from "../lib/ingestion/source-registry";
+import { createVendorAdapter, SOURCE_IDS, type AdapterEnvironment } from "../lib/ingestion/source-registry";
+import { advanceCheckpoint, checkpointBatchKey, loadOrCreateCheckpoint, markCheckpointFailed, markCheckpointRunning, type IngestionCheckpoint, type IngestionRequest } from "../lib/ingestion/orchestration";
+import { clampBatchSize } from "../lib/ingestion/operational-policy";
 import { ingestCisaKev } from "../lib/ingestion/enrichments/cisa";
 import { ingestEpssBulk } from "../lib/ingestion/enrichments/epss";
 import { constantTimeEqual } from "../lib/ingestion/safety";
 import { addPublicCorsHeaders, publicCorsPreflight } from "../lib/api/cors";
+import { captureD1ProductionBaseline, pruneRollingRetention } from "../lib/operations/d1-health";
 
 interface Env extends AdapterEnvironment {
   ASSETS: Fetcher;
@@ -65,6 +68,8 @@ const worker = {
     }
 
     if (url.pathname === "/api/internal/ingest" && request.method === "POST") return handleIngestion(request, env);
+    if (url.pathname === "/api/internal/health" && request.method === "GET") return handleInternalHealth(request, env);
+    if (url.pathname === "/api/internal/retention" && request.method === "POST") return handleRetention(request, env);
 
     if (url.pathname === "/_vinext/image") {
       const allowedWidths = [...DEFAULT_DEVICE_SIZES, ...DEFAULT_IMAGE_SIZES];
@@ -87,7 +92,75 @@ export default worker;
 const authFailures = new Map<string, { count: number; resetAt: number }>();
 
 async function handleIngestion(request: Request, env: Env): Promise<Response> {
-  if (!env.INGEST_SECRET) return privateJson({ error: "Ingestion is not configured" }, 503);
+  const authError = authorizeInternalRequest(request, env);
+  if (authError) return authError;
+  const length = Number(request.headers.get("content-length") ?? 0);
+  if (length > 16_384) return privateJson({ error: "Request body is too large" }, 413);
+  let body: IngestionRequest & { sources?: string[]; idempotencyKey?: string; maxItems?: number };
+  try {
+    const rawBody = await request.text();
+    if (new TextEncoder().encode(rawBody).byteLength > 16_384) return privateJson({ error: "Request body is too large" }, 413);
+    body = JSON.parse(rawBody) as typeof body;
+  } catch { return privateJson({ error: "Invalid JSON body" }, 400); }
+  const requested = [...new Set(body.sources ?? [])];
+  if (requested.length !== 1) return privateJson({ error: "Exactly one source is required per ingestion invocation" }, 400);
+  const [sourceId] = requested;
+  if (!SOURCE_IDS.has(sourceId)) return privateJson({ error: "Request includes a source outside the ingestion allowlist" }, 400);
+  if ((body.since && !validTimestamp(body.since)) || (body.until && !validTimestamp(body.until))) return privateJson({ error: "since and until must be valid ISO-8601 timestamps" }, 400);
+  if (body.since && body.until && new Date(body.since) > new Date(body.until)) return privateJson({ error: "since must not be later than until" }, 400);
+  try { await seedIngestionCatalog(env.DB); } catch (error) { return privateJson({ error: "Ingestion schema is unavailable", detail: safeError(error) }, 503); }
+
+  const results: unknown[] = [];
+  const holder = crypto.randomUUID();
+  if (!(await acquireLease(env.DB, sourceId, holder))) return privateJson({ completedAt: new Date().toISOString(), status: "partial", results: [{ sourceId, status: "skipped", error: "Source ingestion is already running" }] }, 207);
+  let checkpoint: IngestionCheckpoint | null = null;
+  try {
+    const adapter = createVendorAdapter(sourceId, env);
+    if (adapter) {
+      checkpoint = await loadOrCreateCheckpoint(env.DB, sourceId, body);
+      if (checkpoint.status === "complete") return privateJson({ completedAt: new Date().toISOString(), status: "success", results: [{ sourceId, status: "unchanged", checkpoint }] });
+      await markCheckpointRunning(env.DB, checkpoint.id);
+      const key = body.idempotencyKey ?? checkpointBatchKey(checkpoint);
+      const result = await runVendorAdapter(adapter, new D1IngestionRepository(env.DB), {
+        since: checkpoint.windowStart, until: checkpoint.windowEnd, idempotencyKey: key,
+        mode: checkpoint.mode, continuation: checkpoint.continuation ?? undefined,
+        checkpointId: checkpoint.id, maxItems: clampBatchSize(body.maxItems),
+      });
+      const nextCheckpoint = await advanceCheckpoint(env.DB, checkpoint, result);
+      results.push({ ...result, checkpoint: nextCheckpoint });
+    } else {
+      if (body.mode && body.mode !== "delta") throw new Error(`${sourceId} is a full-snapshot enrichment and only supports delta synchronization`);
+      const key = body.idempotencyKey ?? `${sourceId}:delta:${new Date().toISOString().slice(0, 10)}`;
+      if (sourceId === "cisa-kev") results.push(await ingestCisaKev(env.DB, key));
+      else if (sourceId === "first-epss") results.push(await ingestEpssBulk(env.DB, key));
+    }
+  } catch (error) {
+    const message = safeError(error);
+    if (checkpoint) await markCheckpointFailed(env.DB, checkpoint.id, message);
+    results.push({ sourceId, status: "failed", error: message });
+  } finally {
+    await releaseLease(env.DB, sourceId, holder);
+  }
+  const outcome = ingestionBatchOutcome(results);
+  return privateJson({ completedAt: new Date().toISOString(), status: outcome.status, results }, outcome.httpStatus);
+}
+
+async function handleInternalHealth(request: Request, env: Env): Promise<Response> {
+  const authError = authorizeInternalRequest(request, env);
+  if (authError) return authError;
+  try { return privateJson(await captureD1ProductionBaseline(env.DB)); }
+  catch (error) { return privateJson({ error: "D1 health baseline failed", detail: safeError(error) }, 503); }
+}
+
+async function handleRetention(request: Request, env: Env): Promise<Response> {
+  const authError = authorizeInternalRequest(request, env);
+  if (authError) return authError;
+  try { return privateJson({ completedAt: new Date().toISOString(), ...(await pruneRollingRetention(env.DB)) }); }
+  catch (error) { return privateJson({ error: "Rolling retention failed", detail: safeError(error) }, 503); }
+}
+
+function authorizeInternalRequest(request: Request, env: Env): Response | null {
+  if (!env.INGEST_SECRET) return privateJson({ error: "Internal operations are not configured" }, 503);
   const client = request.headers.get("cf-connecting-ip") ?? "unknown";
   const bucket = authFailures.get(client);
   if (bucket && bucket.count >= 8 && bucket.resetAt > Date.now()) return privateJson({ error: "Too many authentication failures" }, 429);
@@ -97,31 +170,7 @@ async function handleIngestion(request: Request, env: Env): Promise<Response> {
     return privateJson({ error: "Unauthorized" }, 401);
   }
   authFailures.delete(client);
-  const length = Number(request.headers.get("content-length") ?? 0);
-  if (length > 16_384) return privateJson({ error: "Request body is too large" }, 413);
-  let body: { sources?: string[]; since?: string; until?: string; idempotencyKey?: string };
-  try { body = await request.json(); } catch { return privateJson({ error: "Invalid JSON body" }, 400); }
-  const requested = body.sources?.length ? [...new Set(body.sources)] : defaultSourceIds(env);
-  if (requested.some((source) => !SOURCE_IDS.has(source))) return privateJson({ error: "Request includes a source outside the ingestion allowlist" }, 400);
-  if ((body.since && !validTimestamp(body.since)) || (body.until && !validTimestamp(body.until))) return privateJson({ error: "since and until must be valid ISO-8601 timestamps" }, 400);
-  if (body.since && body.until && new Date(body.since) > new Date(body.until)) return privateJson({ error: "since must not be later than until" }, 400);
-  try { await seedIngestionCatalog(env.DB); } catch (error) { return privateJson({ error: "Ingestion schema is unavailable", detail: safeError(error) }, 503); }
-
-  const results: unknown[] = [];
-  for (const sourceId of requested) {
-    const holder = crypto.randomUUID();
-    if (!(await acquireLease(env.DB, sourceId, holder))) { results.push({ sourceId, status: "skipped", error: "Source ingestion is already running" }); continue; }
-    try {
-      const key = body.idempotencyKey ? `${body.idempotencyKey}:${sourceId}` : undefined;
-      const adapter = createVendorAdapter(sourceId, env);
-      if (adapter) results.push(await runVendorAdapter(adapter, new D1IngestionRepository(env.DB), { since: body.since, until: body.until, idempotencyKey: key }));
-      else if (sourceId === "cisa-kev") results.push(await ingestCisaKev(env.DB, key));
-      else if (sourceId === "first-epss") results.push(await ingestEpssBulk(env.DB, key));
-    } catch (error) { results.push({ sourceId, status: "failed", error: safeError(error) }); }
-    finally { await releaseLease(env.DB, sourceId, holder); }
-  }
-  const outcome = ingestionBatchOutcome(results);
-  return privateJson({ completedAt: new Date().toISOString(), status: outcome.status, results }, outcome.httpStatus);
+  return null;
 }
 
 async function acquireLease(db: D1Database, sourceId: string, holder: string): Promise<boolean> {

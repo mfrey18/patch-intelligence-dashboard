@@ -1,5 +1,6 @@
 import type { NormalizedAdvisory, NormalizedAffectedProduct, NormalizedRemediation } from "../../domain/types";
 import type { AdvisoryRef, RawAdvisory, VendorAdapter } from "../contracts";
+import { defaultDiscoveryStart } from "../operational-policy";
 import { fetchWithPolicy, readJsonLimited, readTextLimited } from "../safety";
 import { iso, normalizeSeverity, uniqueBy, validCve } from "./utils";
 
@@ -34,7 +35,7 @@ export const mozillaAdapter: VendorAdapter = {
   vendor: "mozilla",
   sourceId: "mozilla-mfsa-yaml",
   async discover(ctx) {
-    const start = validDate(ctx.since) ?? new Date(Date.now() - 730 * 86_400_000);
+    const start = validDate(ctx.since) ?? defaultDiscoveryStart();
     const end = validDate(ctx.until) ?? new Date();
     const refs = new Map<string, AdvisoryRef>();
 

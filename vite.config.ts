@@ -26,6 +26,7 @@ const localBindingConfig = {
           binding: d1,
           database_name: databaseName,
           database_id: databaseId,
+          migrations_dir: "./migrations",
         },
       ]
     : [],
@@ -37,6 +38,7 @@ const localBindingConfig = {
         },
       ]
     : [],
+  limits: { subrequests: 50 },
 };
 
 export default defineConfig(async () => {

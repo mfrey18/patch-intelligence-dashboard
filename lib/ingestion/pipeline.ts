@@ -1,11 +1,21 @@
 import type { ChangeType, NormalizedAdvisory } from "../domain/types";
 import { diffAdvisory } from "./diff";
 import { hashAdvisory } from "./hash";
-import type { IngestionRepository, IngestResult, SourcePolicy, VendorAdapter } from "./contracts";
+import type { IngestionMode, IngestionRepository, IngestResult, SourcePolicy, VendorAdapter } from "./contracts";
 import { DEFAULT_SOURCE_POLICY } from "./contracts";
+import { clampBatchSize, decodeContinuationOffset, encodeContinuationOffset } from "./operational-policy";
 import { sanitizeText } from "./safety";
 
-export interface RunVendorOptions { since?: string; until?: string; idempotencyKey?: string; policy?: Partial<SourcePolicy>; }
+export interface RunVendorOptions {
+  since?: string;
+  until?: string;
+  idempotencyKey?: string;
+  policy?: Partial<SourcePolicy>;
+  mode?: IngestionMode;
+  continuation?: string;
+  checkpointId?: string;
+  maxItems?: number;
+}
 
 export function ingestionBatchOutcome(results: readonly unknown[]): { status: "success" | "partial"; httpStatus: 200 | 207 } {
   const incomplete = results.some((result) => {
@@ -17,14 +27,28 @@ export function ingestionBatchOutcome(results: readonly unknown[]): { status: "s
 
 export async function runVendorAdapter(adapter: VendorAdapter, repository: IngestionRepository, options: RunVendorOptions = {}): Promise<IngestResult> {
   const startedAt = new Date().toISOString();
-  const { runId, reused } = await repository.beginRun(adapter.sourceId, options.idempotencyKey);
-  if (reused) return { sourceId: adapter.sourceId, runId, status: "unchanged", counts: { discovered: 0, inserted: 0, changed: 0, unchanged: 0, failed: 0 }, errors: [], startedAt, completedAt: new Date().toISOString() };
+  const mode = options.mode ?? "delta";
+  const maxItems = clampBatchSize(options.maxItems);
+  const runMetadata = { mode, windowStart: options.since, windowEnd: options.until, continuationIn: options.continuation, checkpointId: options.checkpointId, maxItems };
+  const { runId, reused, continuation: storedContinuation, boundHit: storedBoundHit } = await repository.beginRun(adapter.sourceId, options.idempotencyKey, runMetadata);
+  if (reused) return { sourceId: adapter.sourceId, runId, status: storedBoundHit ? "partial" : "unchanged", mode, window: { since: options.since, until: options.until }, processed: 0, continuation: storedContinuation, boundHit: storedBoundHit, counts: { discovered: 0, inserted: 0, changed: 0, unchanged: 0, failed: 0 }, errors: [], startedAt, completedAt: new Date().toISOString() };
   const policy = { ...DEFAULT_SOURCE_POLICY, ...options.policy };
   const counts = { discovered: 0, inserted: 0, changed: 0, unchanged: 0, failed: 0 };
   const errors: string[] = [];
+  let processed = 0;
+  let continuation: string | null = null;
+  let boundHit = false;
   try {
-    const refs = await adapter.discover({ fetch, since: options.since, until: options.until, policy });
-    counts.discovered = refs.length;
+    const discovered = (await adapter.discover({ fetch, since: options.since, until: options.until, policy })).toSorted((left, right) => `${left.sourceUpdatedAt ?? ""}|${left.id}|${left.url}`.localeCompare(`${right.sourceUpdatedAt ?? ""}|${right.id}|${right.url}`));
+    counts.discovered = discovered.length;
+    const offset = decodeContinuationOffset(options.continuation);
+    if (offset > discovered.length) throw new Error("Ingestion continuation exceeds the deterministic discovery set");
+    const refs = discovered.slice(offset, offset + maxItems);
+    processed = refs.length;
+    if (offset + refs.length < discovered.length) {
+      continuation = encodeContinuationOffset(offset + refs.length);
+      boundHit = true;
+    }
     for (const ref of refs) {
       const itemStart = Date.now();
       try {
@@ -50,9 +74,10 @@ export async function runVendorAdapter(adapter: VendorAdapter, repository: Inges
     counts.failed += 1;
     errors.push(`discovery: ${safeError(error)}`);
   }
-  const status: IngestResult["status"] = counts.failed > 0 ? counts.inserted + counts.changed + counts.unchanged > 0 ? "partial" : "failed" : counts.inserted + counts.changed === 0 ? "unchanged" : "success";
-  await repository.finishRun(runId, { status, counts, errors });
-  return { sourceId: adapter.sourceId, runId, status, counts, errors, startedAt, completedAt: new Date().toISOString() };
+  const status: IngestResult["status"] = counts.failed > 0 ? counts.inserted + counts.changed + counts.unchanged > 0 ? "partial" : "failed" : boundHit ? "partial" : counts.inserted + counts.changed === 0 ? "unchanged" : "success";
+  const result = { status, mode, window: { since: options.since, until: options.until }, processed, continuation, boundHit, counts, errors };
+  await repository.finishRun(runId, result);
+  return { sourceId: adapter.sourceId, runId, ...result, startedAt, completedAt: new Date().toISOString() };
 }
 
 export function validateNormalizedAdvisory(advisory: NormalizedAdvisory, adapter: VendorAdapter): void {

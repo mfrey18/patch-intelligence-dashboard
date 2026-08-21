@@ -1,8 +1,9 @@
 name: Deploy static dashboard to GitHub Pages
 
 on:
-  push:
-    branches: [main]
+  workflow_run:
+    workflows: ["Validate and deploy Cloudflare API"]
+    types: [completed]
   workflow_dispatch:
 
 permissions:
@@ -11,11 +12,12 @@ permissions:
   id-token: write
 
 concurrency:
-  group: github-pages
-  cancel-in-progress: true
+  group: production-deployment
+  cancel-in-progress: false
 
 jobs:
   build:
+    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -60,3 +62,12 @@ jobs:
       - name: Deploy GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
+      - name: Smoke-test deployed repository page
+        env:
+          PAGE_URL: ${{ steps.deployment.outputs.page_url }}
+        run: |
+          for attempt in 1 2 3 4 5; do
+            if curl --fail --silent --show-error "$PAGE_URL" | grep -q 'Patch Intelligence'; then exit 0; fi
+            sleep 5
+          done
+          exit 1

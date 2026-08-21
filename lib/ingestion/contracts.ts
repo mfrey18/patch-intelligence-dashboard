@@ -28,6 +28,17 @@ export interface DiscoveryContext { fetch: typeof fetch; since?: string; until?:
 export interface FetchContext { fetch: typeof fetch; signal?: AbortSignal; policy: SourcePolicy; }
 export interface NormalizeContext { observedAt: string; sanitizeText(value: unknown): string | undefined; }
 
+export type IngestionMode = "delta" | "replay" | "backfill" | "patch_tuesday";
+
+export interface RunMetadata {
+  mode: IngestionMode;
+  windowStart?: string;
+  windowEnd?: string;
+  continuationIn?: string;
+  checkpointId?: string;
+  maxItems: number;
+}
+
 export interface VendorAdapter {
   vendor: VendorId;
   sourceId: string;
@@ -37,7 +48,20 @@ export interface VendorAdapter {
 }
 
 export interface IngestCounts { discovered: number; inserted: number; changed: number; unchanged: number; failed: number; }
-export interface IngestResult { sourceId: string; runId: string; status: "success" | "partial" | "failed" | "unchanged"; counts: IngestCounts; errors: string[]; startedAt: string; completedAt: string; }
+export interface IngestResult {
+  sourceId: string;
+  runId: string;
+  status: "success" | "partial" | "failed" | "unchanged";
+  mode: IngestionMode;
+  window: { since?: string; until?: string };
+  processed: number;
+  continuation: string | null;
+  boundHit: boolean;
+  counts: IngestCounts;
+  errors: string[];
+  startedAt: string;
+  completedAt: string;
+}
 
 export interface PriorRevision {
   advisoryId: string;
@@ -52,7 +76,7 @@ export interface PriorRevision {
 }
 
 export interface IngestionRepository {
-  beginRun(sourceId: string, idempotencyKey?: string): Promise<{ runId: string; reused: boolean }>;
+  beginRun(sourceId: string, idempotencyKey: string | undefined, metadata: RunMetadata): Promise<{ runId: string; reused: boolean; continuation: string | null; boundHit: boolean }>;
   finishRun(runId: string, result: Omit<IngestResult, "sourceId" | "runId" | "startedAt" | "completedAt">): Promise<void>;
   latestRevision(vendor: VendorId, vendorAdvisoryId: string): Promise<PriorRevision | null>;
   saveAdvisory(runId: string, advisory: NormalizedAdvisory, changeTypes: string[]): Promise<"inserted" | "changed" | "unchanged">;

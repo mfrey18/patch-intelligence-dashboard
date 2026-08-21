@@ -1,5 +1,5 @@
 import type { ChangeType, NormalizedAdvisory, VendorId } from "../domain/types";
-import type { AdvisoryRef, IngestionRepository, IngestResult, PriorRevision } from "./contracts";
+import type { AdvisoryRef, IngestionRepository, IngestResult, PriorRevision, RunMetadata } from "./contracts";
 import { hashAdvisory, sha256 } from "./hash";
 import { summarizeChange } from "./pipeline";
 import { SOURCE_CATALOG } from "./source-catalog";
@@ -7,18 +7,21 @@ import { SOURCE_CATALOG } from "./source-catalog";
 export class D1IngestionRepository implements IngestionRepository {
   constructor(private readonly db: D1Database) {}
 
-  async beginRun(sourceId: string, idempotencyKey?: string): Promise<{ runId: string; reused: boolean }> {
+  async beginRun(sourceId: string, idempotencyKey: string | undefined, metadata: RunMetadata): Promise<{ runId: string; reused: boolean; continuation: string | null; boundHit: boolean }> {
     if (idempotencyKey) {
-      const existing = await this.db.prepare("SELECT id FROM source_runs WHERE source_id = ? AND idempotency_key = ? LIMIT 1").bind(sourceId, idempotencyKey).first<{ id: string }>();
-      if (existing) return { runId: existing.id, reused: true };
+      const existing = await this.db.prepare("SELECT id, status, records_failed, continuation_out, bound_hit FROM source_runs WHERE source_id = ? AND idempotency_key = ? LIMIT 1").bind(sourceId, idempotencyKey).first<{ id: string; status: string; records_failed: number; continuation_out: string | null; bound_hit: number }>();
+      if (existing && existing.status !== "running" && existing.status !== "failed" && Number(existing.records_failed) === 0) return { runId: existing.id, reused: true, continuation: existing.continuation_out, boundHit: Boolean(existing.bound_hit) };
+      // Preserve the failed/interrupted attempt as audit evidence while allowing a
+      // deterministic checkpoint batch to be retried under the same public key.
+      if (existing) await this.db.prepare("UPDATE source_runs SET idempotency_key=NULL WHERE id=?").bind(existing.id).run();
     }
     const runId = crypto.randomUUID();
-    await this.db.prepare("INSERT INTO source_runs (id, source_id, idempotency_key, started_at, status, records_discovered, records_inserted, records_changed, records_unchanged, records_failed) VALUES (?, ?, ?, ?, 'running', 0, 0, 0, 0, 0)").bind(runId, sourceId, idempotencyKey ?? null, new Date().toISOString()).run();
-    return { runId, reused: false };
+    await this.db.prepare("INSERT INTO source_runs (id, source_id, idempotency_key, started_at, status, ingestion_mode, window_start, window_end, continuation_in, checkpoint_id, max_items, bound_hit, records_discovered, records_inserted, records_changed, records_unchanged, records_failed) VALUES (?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, 0)").bind(runId, sourceId, idempotencyKey ?? null, new Date().toISOString(), metadata.mode, metadata.windowStart ?? null, metadata.windowEnd ?? null, metadata.continuationIn ?? null, metadata.checkpointId ?? null, metadata.maxItems).run();
+    return { runId, reused: false, continuation: null, boundHit: false };
   }
 
   async finishRun(runId: string, result: Omit<IngestResult, "sourceId" | "runId" | "startedAt" | "completedAt">): Promise<void> {
-    await this.db.prepare("UPDATE source_runs SET completed_at = ?, status = ?, records_discovered = ?, records_inserted = ?, records_changed = ?, records_unchanged = ?, records_failed = ?, error_summary = ? WHERE id = ?").bind(new Date().toISOString(), result.status, result.counts.discovered, result.counts.inserted, result.counts.changed, result.counts.unchanged, result.counts.failed, result.errors.join(" | ").slice(0, 2000) || null, runId).run();
+    await this.db.prepare("UPDATE source_runs SET completed_at = ?, status = ?, ingestion_mode = ?, window_start = ?, window_end = ?, continuation_out = ?, bound_hit = ?, records_discovered = ?, records_inserted = ?, records_changed = ?, records_unchanged = ?, records_failed = ?, error_summary = ? WHERE id = ?").bind(new Date().toISOString(), result.status, result.mode, result.window.since ?? null, result.window.until ?? null, result.continuation, result.boundHit ? 1 : 0, result.counts.discovered, result.counts.inserted, result.counts.changed, result.counts.unchanged, result.counts.failed, result.errors.join(" | ").slice(0, 2000) || null, runId).run();
   }
 
   async latestRevision(vendor: VendorId, vendorAdvisoryId: string): Promise<PriorRevision | null> {

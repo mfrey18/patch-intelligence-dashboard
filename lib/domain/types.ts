@@ -101,6 +101,13 @@ export interface AdvisorySnapshot extends AdvisoryHashes {
 export interface PriorityResult {
   level: PriorityLevel;
   reasons: string[];
+  components: {
+    kev: boolean;
+    exploitationStatus: ExploitationStatus;
+    severity: NormalizedSeverity;
+    cvss: number | null;
+    epssPercentile: number | null;
+  };
 }
 
 export interface DashboardVulnerabilityRow {

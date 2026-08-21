@@ -1,5 +1,6 @@
 import type { NormalizedAdvisory } from "../../domain/types";
 import type { AdvisoryRef, RawAdvisory, VendorAdapter } from "../contracts";
+import { defaultDiscoveryStart } from "../operational-policy";
 import { fetchWithPolicy, readJsonLimited, readTextLimited } from "../safety";
 import { normalizeCsaf } from "./csaf";
 
@@ -10,7 +11,7 @@ export const microsoftAdapter: VendorAdapter = {
   vendor: "microsoft",
   sourceId: "microsoft-msrc-csaf",
   async discover(ctx) {
-    const since = new Date(ctx.since ?? Date.now() - 730 * 24 * 60 * 60 * 1000);
+    const since = defaultDiscoveryStart(ctx.since);
     const until = ctx.until ? new Date(ctx.until) : null;
     const refs: AdvisoryRef[] = [];
     for (const directory of DIRECTORIES) {

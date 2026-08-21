@@ -32,7 +32,17 @@ export function calculatePriority(input: PriorityInput): PriorityResult {
   if (input.cvss != null) reasons.push(`CVSS ${input.cvss.toFixed(1)}`);
   if (input.epssPercentile != null) reasons.push(`EPSS ${ordinalPercentile(input.epssPercentile)}`);
   if (reasons.length === 0) reasons.push("Routine vendor advisory");
-  return { level, reasons };
+  return {
+    level,
+    reasons,
+    components: {
+      kev: input.kev,
+      exploitationStatus: input.exploitationStatus,
+      severity: input.severity,
+      cvss: input.cvss ?? null,
+      epssPercentile: input.epssPercentile ?? null,
+    },
+  };
 }
 
 function capitalize(value: string): string { return `${value[0]?.toUpperCase() ?? ""}${value.slice(1)}`; }

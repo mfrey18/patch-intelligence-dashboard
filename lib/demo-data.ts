@@ -13,10 +13,7 @@ export const demoDashboard: DashboardResponse = {
   recentChanges: [],
   nextCursor: null,
   sourceHealth: [
-    { sourceId: "microsoft-msrc-csaf", name: "Microsoft MSRC CSAF", lastAttempt: null, lastSuccess: null, durationMs: null, result: null, discovered: 0, inserted: 0, changed: 0, unchanged: 0, failed: 0, errorSummary: null },
-    { sourceId: "cisco-psirt-csaf", name: "Cisco PSIRT CSAF", lastAttempt: null, lastSuccess: null, durationMs: null, result: null, discovered: 0, inserted: 0, changed: 0, unchanged: 0, failed: 0, errorSummary: null },
-    { sourceId: "cisa-kev", name: "CISA KEV", lastAttempt: null, lastSuccess: null, durationMs: null, result: null, discovered: 0, inserted: 0, changed: 0, unchanged: 0, failed: 0, errorSummary: null },
-    { sourceId: "first-epss", name: "FIRST EPSS", lastAttempt: null, lastSuccess: null, durationMs: null, result: null, discovered: 0, inserted: 0, changed: 0, unchanged: 0, failed: 0, errorSummary: null },
+    ...["microsoft-msrc-csaf", "cisco-psirt-csaf", "cisa-kev", "first-epss"].map((sourceId, index) => ({ sourceId, name: ["Microsoft MSRC CSAF", "Cisco PSIRT CSAF", "CISA KEV", "FIRST EPSS"][index], lastAttempt: null, lastSuccess: null, lastFailure: null, durationMs: null, result: null, mode: null, freshness: "never" as const, discovered: 0, inserted: 0, changed: 0, unchanged: 0, failed: 0, boundHit: false, errorSummary: null, lease: { active: false, expiresAt: null }, checkpoint: null })),
   ],
   latestReleaseEvent: null,
 };

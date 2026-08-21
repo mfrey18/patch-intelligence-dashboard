@@ -37,15 +37,25 @@ Generate or apply the D1 schema:
 ```bash
 pnpm db:generate
 pnpm wrangler d1 execute site-creator-d1 --local --file=drizzle/0000_patch_intelligence_core.sql
+pnpm wrangler d1 migrations apply site-creator-d1 --local
 ```
 
-Run a source-selective ingestion:
+Run one source per ingestion invocation:
 
 ```bash
-Invoke-RestMethod -Method Post -Uri http://localhost:3000/api/internal/ingest -Headers @{ Authorization = "Bearer $env:INGEST_SECRET" } -ContentType application/json -Body '{"sources":["microsoft-msrc-csaf","cisco-psirt-csaf","cisa-kev","first-epss"],"idempotencyKey":"local-initial"}'
+Invoke-RestMethod -Method Post -Uri http://localhost:3000/api/internal/ingest -Headers @{ Authorization = "Bearer $env:INGEST_SECRET" } -ContentType application/json -Body '{"sources":["microsoft-msrc-csaf"],"mode":"delta","idempotencyKey":"local-ms-delta-2026-08-21"}'
 ```
 
-Allowed source IDs are centralized in `lib/ingestion/source-catalog.ts`. Omitting `sources` runs public sources plus configured private sources; credential-dependent sources are not selected until configured. Cisco requires OpenVuln client credentials. Adobe and Fortinet accept only official-hosted configured indexes/CSAF exports. Apple and SAP accept only allowlisted vendor-hosted CSAF URLs, with an optional bearer token. Each source commits independently, preserves last-known-good data on failure, and reports partial success.
+Allowed source IDs are centralized in `lib/ingestion/source-catalog.ts`. Exactly one source is required per invocation so a failing or subrequest-heavy adapter cannot obscure or block another source. Cisco requires OpenVuln client credentials. Adobe and Fortinet accept only official-hosted configured indexes/CSAF exports. Apple and SAP accept only allowlisted vendor-hosted CSAF URLs, with an optional bearer token. Each source commits independently and preserves last-known-good data on failure.
+
+The public dataset targets a rolling six-month advisory/CVE window. Vendor ingestion has explicit modes:
+
+- **Delta** is the normal three-day overlap for newly published or modified advisories. It does not scan the full window.
+- **Replay** requires explicit timestamps and deterministically re-fetches a selected interval for reconciliation, revision detection, and idempotency checks.
+- **Backfill** starts at the six-month boundary and advances through persisted one-day checkpoints until the requested range is complete.
+- **Patch Tuesday reconciliation** is a targeted Microsoft one-day window used in addition to the daily delta.
+
+Cloudflare Workers Free permits 50 external subrequests per invocation. The shared policy processes at most 12 discovered advisory documents per invocation; with discovery and up to two retries, this keeps a conservative reserve for redirects and vendor authentication. Continuation state is persisted in D1, retries reuse deterministic idempotency keys, materially unchanged content does not create another revision, and leases are released on both success and failure.
 
 ## Validation
 
@@ -64,12 +74,14 @@ The focused suites cover normalized adapter fixtures, hashing and revision diffs
 - `GET /api/dashboard` — filtered summary, since-refresh changes, priority distribution, chart data, release event comparison, source health, and cursor-paginated rows. Filter state is URL-native.
 - `GET /api/cves/:id` — canonical CVE data, vendor assertions, affected products, remediation, exploitation evidence, KEV, EPSS current/history, timeline, and source links.
 - `POST /api/internal/ingest` — bearer-protected, idempotent, source-allowlisted ingestion with bounded request size and per-source leases.
+- `GET /api/internal/health` — bearer-protected D1 size, row/index inventory, EPSS growth, representative query latency, and directional capacity projections.
+- `POST /api/internal/retention` — bearer-protected rolling retention for EPSS history plus completed-checkpoint and expired-lease housekeeping; advisory/revision audit history is preserved.
 
 Cross-origin access is available only for `GET /api/dashboard` and `GET /api/cves/:id`, and only to exact origins configured through `PUBLIC_DASHBOARD_ORIGINS`. The internal ingestion route never emits browser CORS headers.
 
 ## GitHub Pages + Cloudflare
 
-See `docs/github-pages-cloudflare.md` for the one-time D1 setup and required GitHub repository variables/secrets. The workflows are intentionally separate: `.github/workflows/cloudflare.yml` validates and deploys the Worker, while `.github/workflows/pages.yml` publishes the static dashboard after the Worker origin is configured.
+See `docs/github-pages-cloudflare.md` for the one-time D1 setup and required GitHub repository variables/secrets. The Worker workflow validates, checks and applies backward-compatible migrations, deploys and smoke-tests the API. Only a successful Worker workflow on `main` triggers the Pages workflow, so the static client cannot race ahead of its API schema. Both production workflows share a non-cancelling concurrency group.
 
 ## Source semantics and maintenance
 
@@ -78,7 +90,9 @@ See `docs/github-pages-cloudflare.md` for the one-time D1 setup and required Git
 - Microsoft and Cisco remediation/exploitation fields are normalized only when their structured source data or explicit vendor text supports them. Source-format changes require fixture updates before parser changes are promoted.
 - Palo Alto uses its official RSS plus CSAF endpoint. Ivanti uses full official RSS content only. Mozilla uses the official Foundation Security Advisories YAML repository. Oracle uses quarterly official CSAF documents. Atlassian uses its public Vulnerability API and is rate-limited by the vendor to 10 requests/minute.
 - Adobe and Fortinet require configured authoritative machine-readable endpoints; Apple exposes only HTML publicly, while SAP Security Notes require entitlement. VMware/Broadcom, Citrix, and Chrome are intentionally deferred because no stable official structured advisory feed was verified. HTML/portal parsers were not introduced.
-- RSS discovery is a current-feed mechanism and cannot guarantee a complete 24-month backfill. A verified vendor manifest or entitled feed is required before claiming historical completeness for those sources.
-- The public query is constrained to a rolling 24-month window. Older EPSS observations can remain available on CVE detail pages for trend context.
+- RSS discovery is a current-feed mechanism and cannot guarantee a complete six-month backfill. A verified vendor manifest or entitled feed is required before claiming historical completeness for those sources.
+- The public query and retained EPSS trend data are constrained to a rolling six-month window. Advisory revisions, intelligence changes, and source-run audit records are retained when relational or audit value requires them.
+
+The production-readiness decision and runbook are in `docs/production-readiness.md`. The current capacity snapshot is recorded in `docs/d1-production-baseline.md`.
 
 Production access settings and public deployment are intentionally not changed by this repository.
