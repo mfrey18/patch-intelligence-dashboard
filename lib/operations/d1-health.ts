@@ -9,14 +9,15 @@ const STARTUP_AUDIT_ROWS_PER_DAY_ESTIMATE = 60;
 export interface D1ProductionBaseline {
   capturedAt: string;
   intelligenceWindowMonths: number;
-  databaseBytes: number;
+  databaseBytes: null;
+  databaseSizeSource: "wrangler_d1_info_required";
   rowCounts: Record<string, number>;
   largestTables: Array<{ table: string; rows: number }>;
   indexes: Array<{ name: string; table: string; sql: string | null }>;
   epssHistory: { rows: number; datasetDays: number; rowsPerDatasetDay: number; oldestDate: string | null; newestDate: string | null };
   queryLatencyMs: Record<string, number>;
   slowestImportantQuery: { name: string; durationMs: number };
-  projections: Array<{ horizon: "current" | "plus_6_months" | "plus_12_months"; estimatedRows: number; estimatedBytes: number }>;
+  projections: Array<{ horizon: "current" | "plus_6_months" | "plus_12_months"; estimatedRows: number; estimatedBytes: null }>;
   projectionAssumptions: string[];
   baselineMaturity: "startup" | "representative";
 }
@@ -28,9 +29,6 @@ export async function captureD1ProductionBaseline(db: D1Database): Promise<D1Pro
     rowCounts[table] = Number(row?.row_count ?? 0);
   }
   const indexes = await db.prepare("SELECT name, tbl_name table_name, sql FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_autoindex_%' ORDER BY tbl_name,name").all<{ name: string; table_name: string; sql: string | null }>();
-  const pageCount = await db.prepare("PRAGMA page_count").first<Record<string, unknown>>();
-  const pageSize = await db.prepare("PRAGMA page_size").first<Record<string, unknown>>();
-  const databaseBytes = Number(pageCount?.page_count ?? 0) * Number(pageSize?.page_size ?? 0);
   const epss = await db.prepare("SELECT COUNT(*) rows, COUNT(DISTINCT score_date) dataset_days, MIN(score_date) oldest_date, MAX(score_date) newest_date FROM epss_observations").first<Record<string, unknown>>();
 
   const queryLatencyMs: Record<string, number> = {};
@@ -48,7 +46,6 @@ export async function captureD1ProductionBaseline(db: D1Database): Promise<D1Pro
   const epssRows = Number(epss?.rows ?? 0);
   const datasetDays = Number(epss?.dataset_days ?? 0);
   const epssPerDay = datasetDays > 0 ? epssRows / datasetDays : 0;
-  const averageBytesPerRow = totalRows > 0 ? databaseBytes / totalRows : 0;
   const observationSpan = await db.prepare("SELECT MIN(started_at) oldest, MAX(started_at) newest FROM source_runs").first<Record<string, unknown>>();
   const observedDays = dateSpanDays(nullableString(observationSpan?.oldest), nullableString(observationSpan?.newest));
   const auditRows = (rowCounts.advisory_revisions ?? 0) + (rowCounts.intelligence_changes ?? 0) + (rowCounts.source_run_results ?? 0) + (rowCounts.source_runs ?? 0);
@@ -63,15 +60,16 @@ export async function captureD1ProductionBaseline(db: D1Database): Promise<D1Pro
   return {
     capturedAt: new Date().toISOString(),
     intelligenceWindowMonths: INTELLIGENCE_WINDOW_MONTHS,
-    databaseBytes,
+    databaseBytes: null,
+    databaseSizeSource: "wrangler_d1_info_required",
     rowCounts,
     largestTables: Object.entries(rowCounts).map(([table, rows]) => ({ table, rows })).sort((left, right) => right.rows - left.rows).slice(0, 8),
     indexes: (indexes.results ?? []).map((row) => ({ name: row.name, table: row.table_name, sql: row.sql })),
     epssHistory: { rows: epssRows, datasetDays, rowsPerDatasetDay: datasetDays > 0 ? Math.round(epssPerDay) : 0, oldestDate: nullableString(epss?.oldest_date), newestDate: nullableString(epss?.newest_date) },
     queryLatencyMs,
     slowestImportantQuery: { name: sortedLatency[0]?.[0] ?? "none", durationMs: sortedLatency[0]?.[1] ?? 0 },
-    projections: (["current", "plus_6_months", "plus_12_months"] as const).map((horizon, index) => ({ horizon, estimatedRows: projectionRows[index], estimatedBytes: Math.round(projectionRows[index] * averageBytesPerRow) })),
-    projectionAssumptions: ["EPSS observations are retained for the rolling six-month window.", baselineMaturity === "representative" ? "Advisory and audit history is not destructively pruned; observed audit-row growth is projected linearly." : `Fewer than seven days of production runs are available; the startup projection assumes ${STARTUP_AUDIT_ROWS_PER_DAY_ESTIMATE} audit/run rows per day and must be refreshed after a representative week.`, "Byte estimates use the current whole-database average bytes per row and are directional capacity indicators, not quotas."],
+    projections: (["current", "plus_6_months", "plus_12_months"] as const).map((horizon, index) => ({ horizon, estimatedRows: projectionRows[index], estimatedBytes: null })),
+    projectionAssumptions: ["EPSS observations are retained for the rolling six-month window.", baselineMaturity === "representative" ? "Advisory and audit history is not destructively pruned; observed audit-row growth is projected linearly." : `Fewer than seven days of production runs are available; the startup projection assumes ${STARTUP_AUDIT_ROWS_PER_DAY_ESTIMATE} audit/run rows per day and must be refreshed after a representative week.`, "Cloudflare D1 does not authorize page-size PRAGMAs through a Worker binding; deployment enriches this health snapshot with the authoritative database_size from wrangler d1 info."],
     baselineMaturity,
   };
 }

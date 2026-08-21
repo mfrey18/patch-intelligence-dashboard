@@ -6,16 +6,17 @@ This document records read-only production observations before the Free-plan/six
 
 The authenticated `GET /api/internal/health` endpoint captures:
 
-- database bytes from SQLite page count × page size;
 - row counts for major intelligence, enrichment, audit, checkpoint, and lease tables;
 - non-automatic index inventory;
 - largest tables by row count;
 - EPSS observation count, dataset-day count, date range, and observations per dataset day;
 - representative dashboard-summary, priority-signal, current-EPSS, and source-health query latency;
 - the slowest measured important query;
-- directional current, +6-month, and +12-month row/byte projections.
+- directional current, +6-month, and +12-month row projections.
 
-Projections retain only a rolling six months of EPSS observations while projecting advisory/revision/change/run audit growth linearly from observed activity. Whole-database average bytes per row makes the byte figures directional rather than a storage guarantee.
+Cloudflare D1 rejects `PRAGMA page_count` and `PRAGMA page_size` through a Worker binding. The ordered deployment workflow therefore obtains current database bytes from the supported `wrangler d1 info --json` management command, enriches the authenticated health response with that value, and archives the combined JSON as a 30-day GitHub Actions artifact. Runtime health returns `databaseBytes: null` and `databaseSizeSource: "wrangler_d1_info_required"` so an unavailable value cannot be mistaken for a measured zero.
+
+Projections retain only a rolling six months of EPSS observations while projecting advisory/revision/change/run audit growth linearly from observed activity. In the archived deployment artifact, whole-database average bytes per measured major-table row makes the byte figures directional rather than a storage guarantee.
 
 ## Pre-migration production snapshot
 
@@ -74,4 +75,4 @@ curl --fail --silent \
   "$PUBLIC_API_BASE_URL/api/internal/health"
 ```
 
-Record the output with the Worker version and migration list before invoking retention. Investigate query plans or indexes if an important dashboard query is materially slower than its peers; do not shard preemptively.
+The production workflow combines this response with `wrangler d1 info --json`, validates the measured size and health gates, and archives `d1-production-baseline.json` with the Worker commit SHA. Record that artifact with the Worker version and migration list before invoking retention. Investigate query plans or indexes if an important dashboard query is materially slower than its peers; do not shard preemptively.
