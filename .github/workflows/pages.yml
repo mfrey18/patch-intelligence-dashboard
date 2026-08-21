@@ -41,12 +41,12 @@ jobs:
       - name: Build static dashboard
         env:
           VITE_API_BASE_URL: ${{ vars.PUBLIC_API_BASE_URL }}
-          PAGES_BASE_PATH: ${{ steps.pages.outputs.base_path }}
+          PAGES_BASE_PATH: ${{ steps.pages.outputs.base_path }}/
         run: pnpm run pages:build
       - name: Verify static artifact
         env:
           VITE_API_BASE_URL: ${{ vars.PUBLIC_API_BASE_URL }}
-          PAGES_BASE_PATH: ${{ steps.pages.outputs.base_path }}
+          PAGES_BASE_PATH: ${{ steps.pages.outputs.base_path }}/
         run: pnpm run test:pages
       - uses: actions/upload-pages-artifact@v4
         with:
