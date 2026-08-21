@@ -1,0 +1,49 @@
+name: Validate and deploy Cloudflare API
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloudflare-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CLOUDFLARE_D1_DATABASE_ID: ${{ vars.CLOUDFLARE_D1_DATABASE_ID }}
+      CLOUDFLARE_D1_DATABASE_NAME: ${{ vars.CLOUDFLARE_D1_DATABASE_NAME }}
+      PUBLIC_DASHBOARD_ORIGINS: ${{ vars.PUBLIC_DASHBOARD_ORIGINS }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Require production bindings
+        run: test -n "$CLOUDFLARE_D1_DATABASE_ID" && test -n "$CLOUDFLARE_D1_DATABASE_NAME" && test -n "$PUBLIC_DASHBOARD_ORIGINS"
+      - run: pnpm lint
+      - run: pnpm run test:focused
+      - run: pnpm run build
+      - run: pnpm run test:rendered
+      - name: Deploy Worker and public assets
+        uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          packageManager: pnpm
+          command: deploy
+          secrets: |
+            INGEST_SECRET
+        env:
+          INGEST_SECRET: ${{ secrets.INGEST_SECRET }}
