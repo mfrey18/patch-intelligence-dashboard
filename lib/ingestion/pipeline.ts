@@ -7,6 +7,14 @@ import { sanitizeText } from "./safety";
 
 export interface RunVendorOptions { since?: string; until?: string; idempotencyKey?: string; policy?: Partial<SourcePolicy>; }
 
+export function ingestionBatchOutcome(results: readonly unknown[]): { status: "success" | "partial"; httpStatus: 200 | 207 } {
+  const incomplete = results.some((result) => {
+    const status = (result as { status?: unknown } | null)?.status;
+    return status === "failed" || status === "partial";
+  });
+  return incomplete ? { status: "partial", httpStatus: 207 } : { status: "success", httpStatus: 200 };
+}
+
 export async function runVendorAdapter(adapter: VendorAdapter, repository: IngestionRepository, options: RunVendorOptions = {}): Promise<IngestResult> {
   const startedAt = new Date().toISOString();
   const { runId, reused } = await repository.beginRun(adapter.sourceId, options.idempotencyKey);

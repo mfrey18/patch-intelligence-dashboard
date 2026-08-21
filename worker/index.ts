@@ -5,7 +5,7 @@ import { queryDashboard } from "../lib/api/dashboard-query";
 import { queryCveDetail } from "../lib/api/cve-query";
 import { demoDashboard } from "../lib/demo-data";
 import { D1IngestionRepository, seedIngestionCatalog } from "../lib/ingestion/d1-repository";
-import { runVendorAdapter } from "../lib/ingestion/pipeline";
+import { ingestionBatchOutcome, runVendorAdapter } from "../lib/ingestion/pipeline";
 import { createVendorAdapter, defaultSourceIds, SOURCE_IDS, type AdapterEnvironment } from "../lib/ingestion/source-registry";
 import { ingestCisaKev } from "../lib/ingestion/enrichments/cisa";
 import { ingestEpssBulk } from "../lib/ingestion/enrichments/epss";
@@ -120,8 +120,8 @@ async function handleIngestion(request: Request, env: Env): Promise<Response> {
     } catch (error) { results.push({ sourceId, status: "failed", error: safeError(error) }); }
     finally { await releaseLease(env.DB, sourceId, holder); }
   }
-  const failed = results.some((result) => (result as { status?: string }).status === "failed");
-  return privateJson({ completedAt: new Date().toISOString(), status: failed ? "partial" : "success", results }, failed ? 207 : 200);
+  const outcome = ingestionBatchOutcome(results);
+  return privateJson({ completedAt: new Date().toISOString(), status: outcome.status, results }, outcome.httpStatus);
 }
 
 async function acquireLease(db: D1Database, sourceId: string, holder: string): Promise<boolean> {

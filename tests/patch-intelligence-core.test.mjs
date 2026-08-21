@@ -11,6 +11,22 @@ const { diffAdvisory } = await import("../lib/ingestion/diff.ts");
 const { hashAdvisory, sha256, stableSerialize } = await import(
   "../lib/ingestion/hash.ts"
 );
+const { ingestionBatchOutcome } = await import("../lib/ingestion/pipeline.ts");
+
+test("ingestion batches expose partial vendor results at the outer API boundary", () => {
+  assert.deepEqual(ingestionBatchOutcome([{ status: "success" }, { status: "unchanged" }]), {
+    status: "success",
+    httpStatus: 200,
+  });
+  assert.deepEqual(ingestionBatchOutcome([{ status: "success" }, { status: "partial" }]), {
+    status: "partial",
+    httpStatus: 207,
+  });
+  assert.deepEqual(ingestionBatchOutcome([{ status: "failed" }]), {
+    status: "partial",
+    httpStatus: 207,
+  });
+});
 
 test("priority is explainable and keeps KEV and known exploitation independently visible", () => {
   const result = calculatePriority({
