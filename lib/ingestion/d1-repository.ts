@@ -54,17 +54,34 @@ export class D1IngestionRepository implements IngestionRepository {
       queries.push(this.db.prepare("INSERT INTO advisory_cves (advisory_id, cve_id, vendor_description, vendor_cwe, vendor_severity, normalized_severity, vendor_cvss_score, vendor_cvss_vector) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(advisory_id, cve_id) DO UPDATE SET vendor_description=excluded.vendor_description, vendor_cwe=excluded.vendor_cwe, vendor_severity=excluded.vendor_severity, normalized_severity=excluded.normalized_severity, vendor_cvss_score=excluded.vendor_cvss_score, vendor_cvss_vector=excluded.vendor_cvss_vector").bind(advisoryId, assertion.cveId, assertion.description ?? null, assertion.cwe ?? null, assertion.vendorSeverity ?? null, assertion.normalizedSeverity, assertion.cvssScore ?? null, assertion.cvssVector ?? null));
     }
 
+    // Large CSAF advisories can contain thousands of product/version assertions.
+    // One prepared statement per row repeats SQL and argument metadata until
+    // D1's 32 MiB RPC envelope is exceeded. These JSON-backed INSERT...SELECT
+    // statements keep the same atomic db.batch transaction with bounded RPC
+    // argument overhead and no loss of product or remediation applicability.
+    const productRecords = new Map<string, { id: string; name: string; family: string | null }>();
+    const affectedRecords: Array<Record<string, unknown>> = [];
     for (const product of advisory.affectedProducts) {
       const productId = `${advisory.vendor}:${(await sha256(product.name)).slice(0, 20)}`;
-      queries.push(this.db.prepare("INSERT INTO products (id, vendor_id, name, family, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(vendor_id, name) DO UPDATE SET family=COALESCE(excluded.family, products.family), updated_at=excluded.updated_at").bind(productId, advisory.vendor, product.name, product.family ?? null, now, now));
-      queries.push(this.db.prepare("INSERT INTO affected_products (id, advisory_id, advisory_revision_id, cve_id, product_id, affected_version, fixed_version, status, source_product_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), advisoryId, revisionId, product.cveId ?? null, productId, product.affectedVersion ?? null, product.fixedVersion ?? null, product.status, product.sourceProductId ?? null));
+      const current = productRecords.get(product.name);
+      productRecords.set(product.name, { id: productId, name: product.name, family: product.family ?? current?.family ?? null });
+      affectedRecords.push({ id: crypto.randomUUID(), cveId: product.cveId ?? null, productId, affectedVersion: product.affectedVersion ?? null, fixedVersion: product.fixedVersion ?? null, status: product.status, sourceProductId: product.sourceProductId ?? null });
     }
 
+    const remediationRecords: Array<Record<string, unknown>> = [];
     for (const remediation of advisory.remediations) {
       const productId = remediation.productName ? `${advisory.vendor}:${(await sha256(remediation.productName)).slice(0, 20)}` : null;
-      if (remediation.productName && productId) queries.push(this.db.prepare("INSERT INTO products (id, vendor_id, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(vendor_id, name) DO UPDATE SET updated_at=excluded.updated_at").bind(productId, advisory.vendor, remediation.productName, now, now));
-      queries.push(this.db.prepare("INSERT INTO remediations (id, advisory_id, advisory_revision_id, cve_id, product_id, kind, patch_available, fixed_version, action, reboot_required, superseded, source_url, published_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), advisoryId, revisionId, remediation.cveId ?? null, productId, remediation.kind, remediation.patchAvailable == null ? null : remediation.patchAvailable ? 1 : 0, remediation.fixedVersion ?? null, remediation.action ?? null, remediation.rebootRequired == null ? null : remediation.rebootRequired ? 1 : 0, remediation.superseded == null ? null : remediation.superseded ? 1 : 0, remediation.sourceUrl, remediation.publishedAt ?? null, remediation.updatedAt ?? now));
+      if (remediation.productName && productId && !productRecords.has(remediation.productName)) productRecords.set(remediation.productName, { id: productId, name: remediation.productName, family: null });
+      remediationRecords.push({ id: crypto.randomUUID(), cveId: remediation.cveId ?? null, productId, kind: remediation.kind, patchAvailable: remediation.patchAvailable == null ? null : remediation.patchAvailable ? 1 : 0, fixedVersion: remediation.fixedVersion ?? null, action: remediation.action ?? null, rebootRequired: remediation.rebootRequired == null ? null : remediation.rebootRequired ? 1 : 0, superseded: remediation.superseded == null ? null : remediation.superseded ? 1 : 0, sourceUrl: remediation.sourceUrl, publishedAt: remediation.publishedAt ?? null, updatedAt: remediation.updatedAt ?? now });
     }
+
+    if (productRecords.size > 0) queries.push(this.db.prepare(`INSERT INTO products (id, vendor_id, name, family, created_at, updated_at)
+      SELECT json_extract(value,'$.id'), ?, json_extract(value,'$.name'), json_extract(value,'$.family'), ?, ? FROM json_each(?) WHERE 1
+      ON CONFLICT(vendor_id, name) DO UPDATE SET family=COALESCE(excluded.family, products.family), updated_at=excluded.updated_at`).bind(advisory.vendor, now, now, JSON.stringify([...productRecords.values()])));
+    if (affectedRecords.length > 0) queries.push(this.db.prepare(`INSERT INTO affected_products (id, advisory_id, advisory_revision_id, cve_id, product_id, affected_version, fixed_version, status, source_product_id)
+      SELECT json_extract(value,'$.id'), ?, ?, json_extract(value,'$.cveId'), json_extract(value,'$.productId'), json_extract(value,'$.affectedVersion'), json_extract(value,'$.fixedVersion'), json_extract(value,'$.status'), json_extract(value,'$.sourceProductId') FROM json_each(?)`).bind(advisoryId, revisionId, JSON.stringify(affectedRecords)));
+    if (remediationRecords.length > 0) queries.push(this.db.prepare(`INSERT INTO remediations (id, advisory_id, advisory_revision_id, cve_id, product_id, kind, patch_available, fixed_version, action, reboot_required, superseded, source_url, published_at, updated_at)
+      SELECT json_extract(value,'$.id'), ?, ?, json_extract(value,'$.cveId'), json_extract(value,'$.productId'), json_extract(value,'$.kind'), json_extract(value,'$.patchAvailable'), json_extract(value,'$.fixedVersion'), json_extract(value,'$.action'), json_extract(value,'$.rebootRequired'), json_extract(value,'$.superseded'), json_extract(value,'$.sourceUrl'), json_extract(value,'$.publishedAt'), json_extract(value,'$.updatedAt') FROM json_each(?)`).bind(advisoryId, revisionId, JSON.stringify(remediationRecords)));
 
     for (const evidence of advisory.exploitEvidence) {
       const evidenceId = `${evidence.cveId}:${advisory.sourceId}:${(await sha256(`${evidence.type}|${evidence.evidenceUrl}`)).slice(0, 20)}`;
