@@ -151,6 +151,8 @@ test("production workflows apply migrations before Worker deployment and seriali
   assert.match(ingestion, /backfill:\$\{SOURCE_ID\}:six-month/, "backfills need a stable default checkpoint across workflow runs");
   assert.match(ingestion, /test "\$MAX_ATTEMPTS" -ge 1 && test "\$MAX_ATTEMPTS" -le 50/, "manual orchestration must remain bounded");
   assert.match(ingestion, /Checkpoint remains resumable/, "a bounded workflow run must preserve rather than fail valid partial progress");
+  assert.match(ingestion, /source: cisco-psirt-csaf, max_attempts: 4, batch_size: 2/, "Cisco must use the smaller Workers Free batch proven by production backfill");
+  assert.match(ingestion, /\[ "\$result_status" = "failed" \] \|\| \[ "\$result_status" = "skipped" \]/, "active or stuck source leases must not be reported as successful completion");
   const dailyMatrix = ingestion.slice(ingestion.indexOf("matrix:"), ingestion.indexOf("name: Daily source"));
   for (const source of ["microsoft-msrc-csaf", "cisco-psirt-csaf", "cisa-kev", "first-epss", "palo-alto-psirt-csaf", "mozilla-mfsa-yaml"]) assert.match(dailyMatrix, new RegExp(source));
   for (const quarantined of ["ivanti-security-advisory-rss", "oracle-cpu-csaf", "atlassian-vulnerability-api"]) assert.doesNotMatch(dailyMatrix, new RegExp(quarantined));
