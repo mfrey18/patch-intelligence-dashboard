@@ -148,6 +148,9 @@ test("production workflows apply migrations before Worker deployment and seriali
   assert.match(ingestion, /fail-fast: false/);
   assert.match(ingestion, /source: microsoft-msrc-csaf, max_attempts: 50/, "Microsoft must have enough resumable Worker invocations for the observed change volume");
   assert.match(ingestion, /if \$checkpoint == "" then \{\} else \{checkpointId:\$checkpoint\} end/, "manual dispatch must omit blank checkpoint IDs");
+  assert.match(ingestion, /backfill:\$\{SOURCE_ID\}:six-month/, "backfills need a stable default checkpoint across workflow runs");
+  assert.match(ingestion, /test "\$MAX_ATTEMPTS" -ge 1 && test "\$MAX_ATTEMPTS" -le 50/, "manual orchestration must remain bounded");
+  assert.match(ingestion, /Checkpoint remains resumable/, "a bounded workflow run must preserve rather than fail valid partial progress");
   const dailyMatrix = ingestion.slice(ingestion.indexOf("matrix:"), ingestion.indexOf("name: Daily source"));
   for (const source of ["microsoft-msrc-csaf", "cisco-psirt-csaf", "cisa-kev", "first-epss", "palo-alto-psirt-csaf", "mozilla-mfsa-yaml"]) assert.match(dailyMatrix, new RegExp(source));
   for (const quarantined of ["ivanti-security-advisory-rss", "oracle-cpu-csaf", "atlassian-vulnerability-api"]) assert.doesNotMatch(dailyMatrix, new RegExp(quarantined));

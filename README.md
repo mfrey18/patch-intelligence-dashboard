@@ -74,6 +74,10 @@ The public dataset targets a rolling six-month advisory/CVE window. Vendor inges
 - **Backfill** starts at the six-month boundary and advances through persisted one-day checkpoints until the requested range is complete.
 - **Patch Tuesday reconciliation** is a targeted Microsoft one-day window used in addition to the daily delta.
 
+Manual backfill dispatches default to the stable `backfill:<source>:six-month` checkpoint and accept 1-50 bounded Worker invocations per Actions run. Re-dispatch the same source until the checkpoint reports complete.
+
+The public six-month vulnerability universe includes CVEs with a current vendor advisory and active CISA KEV entries added during the same six-month window. KEV-only records remain explicitly unattributed: vendor severity, affected products, and remediation are not inferred.
+
 Cloudflare Workers Free permits 50 external subrequests per invocation. The shared policy processes at most 12 discovered advisory documents per invocation; with discovery and up to two retries, this keeps a conservative reserve for redirects and vendor authentication. Continuation state is persisted in D1, retries reuse deterministic idempotency keys, materially unchanged content does not create another revision, and leases are released on both success and failure.
 
 ## Validation

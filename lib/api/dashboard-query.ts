@@ -117,13 +117,12 @@ async function queryEmergingVulnerabilities(db: D1Database, cte: string, binding
 }
 
 async function queryVendorThreatSeries(db: D1Database, cte: string, bindings: unknown[]): Promise<DashboardResponse["vendorThreatSeries"]> {
-  const result = await db.prepare(`${cte} SELECT v.name label, COUNT(DISTINCT f.cve_id) total,
-    COUNT(DISTINCT CASE WHEN f.known_exploited=1 THEN f.cve_id END) known_exploited,
-    COUNT(DISTINCT CASE WHEN f.kev=1 THEN f.cve_id END) kev,
-    COUNT(DISTINCT CASE WHEN f.zero_day=1 THEN f.cve_id END) zero_day,
-    COUNT(DISTINCT CASE WHEN f.epss_percentile>=? THEN f.cve_id END) high_epss
-    FROM filtered f JOIN advisory_cves vac ON vac.cve_id=f.cve_id JOIN advisories va ON va.id=vac.advisory_id JOIN vendors v ON v.id=va.vendor_id
-    GROUP BY v.id,v.name ORDER BY known_exploited DESC, kev DESC, high_epss DESC, total DESC LIMIT 12`).bind(...bindings, HIGH_EPSS_PERCENTILE).all<Record<string, unknown>>();
+  const result = await db.prepare(`${cte} SELECT f.vendor label, COUNT(*) total,
+    COALESCE(SUM(f.known_exploited),0) known_exploited,
+    COALESCE(SUM(f.kev),0) kev,
+    COALESCE(SUM(f.zero_day),0) zero_day,
+    COALESCE(SUM(f.epss_percentile>=?),0) high_epss
+    FROM filtered f GROUP BY f.vendor ORDER BY known_exploited DESC, kev DESC, high_epss DESC, total DESC LIMIT 12`).bind(...bindings, HIGH_EPSS_PERCENTILE).all<Record<string, unknown>>();
   return (result.results ?? []).map((row) => ({ label: String(row.label), total: Number(row.total), knownExploited: Number(row.known_exploited), kev: Number(row.kev), zeroDay: Number(row.zero_day), highEpss: Number(row.high_epss) }));
 }
 
@@ -164,8 +163,8 @@ function buildFilteredCte(params: URLSearchParams): { cte: string; bindings: unk
   const add = (condition: string, ...values: unknown[]) => { where.push(condition); bindings.push(...values); };
   if (params.get("vendor")) add("a.vendor_id = ?", params.get("vendor"));
   if (params.get("product")) add("EXISTS(SELECT 1 FROM affected_products apf JOIN products pf ON pf.id=apf.product_id WHERE apf.advisory_id=a.id AND apf.advisory_revision_id=ar.id AND (apf.cve_id=c.id OR apf.cve_id IS NULL) AND pf.name LIKE ?)", `%${escapeLike(params.get("product")!)}%`);
-  if (params.get("severity")) add("ac.normalized_severity = ?", params.get("severity")!.toLowerCase());
-  if (params.get("q")) { const term = `%${escapeLike(params.get("q")!.slice(0, 100))}%`; add("(c.id LIKE ? OR a.title LIKE ? OR ac.vendor_description LIKE ? OR v.name LIKE ? OR EXISTS(SELECT 1 FROM affected_products aps JOIN products ps ON ps.id=aps.product_id WHERE aps.advisory_id=a.id AND aps.advisory_revision_id=ar.id AND (aps.cve_id=c.id OR aps.cve_id IS NULL) AND ps.name LIKE ?))", term, term, term, term, term); }
+  if (params.get("severity")) add("a.id IS NOT NULL AND ac.normalized_severity = ?", params.get("severity")!.toLowerCase());
+  if (params.get("q")) { const term = `%${escapeLike(params.get("q")!.slice(0, 100))}%`; add("(c.id LIKE ? OR a.title LIKE ? OR (a.id IS NOT NULL AND ac.vendor_description LIKE ?) OR v.name LIKE ? OR EXISTS(SELECT 1 FROM affected_products aps JOIN products ps ON ps.id=aps.product_id WHERE aps.advisory_id=a.id AND aps.advisory_revision_id=ar.id AND (aps.cve_id=c.id OR aps.cve_id IS NULL) AND ps.name LIKE ?))", term, term, term, term, term); }
   if (params.get("publishedFrom")) add("date(a.published_at) >= date(?)", params.get("publishedFrom"));
   if (params.get("publishedTo")) add("date(a.published_at) <= date(?)", params.get("publishedTo"));
   if (params.get("modifiedFrom")) add("date(a.source_updated_at) >= date(?)", params.get("modifiedFrom"));
@@ -193,10 +192,11 @@ function buildFilteredCte(params: URLSearchParams): { cte: string; bindings: unk
   const cte = `WITH current_epss AS (
     SELECT eo.cve_id, eo.score, eo.percentile FROM epss_observations eo JOIN epss_datasets ed ON ed.score_date=eo.score_date AND ed.is_current=1
   ), base AS (
-    SELECT c.id cve_id, COALESCE(c.description, MAX(ac.vendor_description), MAX(a.title), c.id) title, GROUP_CONCAT(DISTINCT v.name) vendor,
-      (SELECT GROUP_CONCAT(DISTINCT pp.name) FROM advisory_cves pac JOIN advisories pa ON pa.id=pac.advisory_id JOIN affected_products pap ON pap.advisory_id=pa.id AND (pap.cve_id=c.id OR pap.cve_id IS NULL) AND pap.advisory_revision_id=(SELECT par.id FROM advisory_revisions par WHERE par.advisory_id=pa.id ORDER BY par.observed_at DESC LIMIT 1) JOIN products pp ON pp.id=pap.product_id WHERE pac.cve_id=c.id) product,
-      MAX(CASE ac.normalized_severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END) severity_rank,
-      MAX(ac.vendor_cvss_score) cvss, ce.score epss, ce.percentile epss_percentile,
+    SELECT c.id cve_id, COALESCE(c.description, MAX(CASE WHEN a.id IS NOT NULL THEN ac.vendor_description END), MAX(a.title), c.id) title,
+      COALESCE(GROUP_CONCAT(DISTINCT v.name),'CISA KEV') vendor,
+      (SELECT GROUP_CONCAT(DISTINCT pp.name) FROM advisory_cves pac JOIN advisories pa ON pa.id=pac.advisory_id JOIN affected_products pap ON pap.advisory_id=pa.id AND (pap.cve_id=c.id OR pap.cve_id IS NULL) AND pap.advisory_revision_id=(SELECT par.id FROM advisory_revisions par WHERE par.advisory_id=pa.id ORDER BY par.observed_at DESC LIMIT 1) JOIN products pp ON pp.id=pap.product_id WHERE pac.cve_id=c.id AND COALESCE(pa.published_at,pa.source_updated_at)>=date('now','-${INTELLIGENCE_WINDOW_MONTHS} months')) product,
+      MAX(CASE WHEN a.id IS NULL THEN 0 ELSE CASE ac.normalized_severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END END) severity_rank,
+      MAX(CASE WHEN a.id IS NOT NULL THEN ac.vendor_cvss_score END) cvss, ce.score epss, ce.percentile epss_percentile,
       CASE WHEN EXISTS(SELECT 1 FROM kev_entries k WHERE k.cve_id=c.id AND k.active=1) THEN 1 ELSE 0 END kev,
       CASE WHEN EXISTS(SELECT 1 FROM exploit_evidence ee WHERE ee.cve_id=c.id AND ee.evidence_type='known_exploitation' AND ee.status='confirmed') THEN 1 ELSE 0 END known_exploited,
       CASE WHEN EXISTS(SELECT 1 FROM exploit_evidence ee WHERE ee.cve_id=c.id AND ee.evidence_type='zero_day' AND ee.status='confirmed') THEN 1 ELSE 0 END zero_day,
@@ -204,10 +204,13 @@ function buildFilteredCte(params: URLSearchParams): { cte: string; bindings: unk
       CASE WHEN EXISTS(SELECT 1 FROM remediations rm WHERE ${currentRemediation("rm")} AND rm.kind='mitigation') THEN 1 ELSE 0 END mitigation_available,
       CASE WHEN EXISTS(SELECT 1 FROM remediations rw WHERE ${currentRemediation("rw")} AND rw.kind='workaround') THEN 1 ELSE 0 END workaround_available,
       MIN(a.published_at) published_at, MAX(a.source_updated_at) modified_at
-    FROM cves c JOIN advisory_cves ac ON ac.cve_id=c.id JOIN advisories a ON a.id=ac.advisory_id JOIN vendors v ON v.id=a.vendor_id
-      JOIN advisory_revisions ar ON ar.id=(SELECT ar2.id FROM advisory_revisions ar2 WHERE ar2.advisory_id=a.id ORDER BY ar2.observed_at DESC LIMIT 1)
+    FROM cves c
+      LEFT JOIN advisory_cves ac ON ac.cve_id=c.id
+      LEFT JOIN advisories a ON a.id=ac.advisory_id AND COALESCE(a.published_at,a.source_updated_at)>=date('now','-${INTELLIGENCE_WINDOW_MONTHS} months')
+      LEFT JOIN vendors v ON v.id=a.vendor_id
+      LEFT JOIN advisory_revisions ar ON ar.id=(SELECT ar2.id FROM advisory_revisions ar2 WHERE ar2.advisory_id=a.id ORDER BY ar2.observed_at DESC LIMIT 1)
       LEFT JOIN current_epss ce ON ce.cve_id=c.id
-    WHERE COALESCE(a.published_at,a.source_updated_at) >= date('now','-${INTELLIGENCE_WINDOW_MONTHS} months') AND ${where.join(" AND ")}
+    WHERE (a.id IS NOT NULL OR EXISTS(SELECT 1 FROM kev_entries scope_kev WHERE scope_kev.cve_id=c.id AND scope_kev.active=1 AND date(scope_kev.date_added)>=date('now','-${INTELLIGENCE_WINDOW_MONTHS} months'))) AND ${where.join(" AND ")}
     GROUP BY c.id, ce.score, ce.percentile
   ), filtered AS (SELECT * FROM base WHERE ${outer.join(" AND ")})`;
   return { cte, bindings };
