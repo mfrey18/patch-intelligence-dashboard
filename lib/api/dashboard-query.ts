@@ -14,23 +14,20 @@ export async function queryDashboard(db: D1Database, url: URL): Promise<Dashboar
   const limit = clamp(Number(params.get("limit") ?? 50), 1, 100);
   const offset = decodeCursor(params.get("cursor"));
   const sort = sortSql(params.get("sort"));
-  const rowsResult = await db.prepare(`${cte} SELECT * FROM filtered ORDER BY ${sort} LIMIT ? OFFSET ?`).bind(...bindings, limit + 1, offset).all<BaseRow>();
-  const allRows = rowsResult.results ?? [];
-  const hasMore = allRows.length > limit;
-  const rows = allRows.slice(0, limit).map(toDashboardRow);
-
-  const summary = await db.prepare(`${cte} SELECT COUNT(*) total, COALESCE(SUM(severity_rank=4),0) critical, COALESCE(SUM(severity_rank=3),0) high, COALESCE(SUM(known_exploited),0) known_exploited, COALESCE(SUM(kev),0) kev, COALESCE(SUM(zero_day),0) zero_day, COALESCE(SUM(patch_available=1),0) patch_available, COALESCE(SUM(kev=1 OR known_exploited=1),0) p1, COALESCE(SUM(kev=0 AND known_exploited=0 AND ((severity_rank=4 AND epss_percentile>=?) OR (severity_rank=3 AND epss_percentile>=?))),0) p2 FROM filtered`).bind(...bindings, PRIORITY_THRESHOLDS.criticalHighEpssPercentile, PRIORITY_THRESHOLDS.highVeryHighEpssPercentile).first<Record<string, number>>();
-  const total = Number(summary?.total ?? 0);
-  const p1 = Number(summary?.p1 ?? 0); const p2 = Number(summary?.p2 ?? 0);
-
-  const severityRows = await db.prepare(`${cte} SELECT severity_rank, COUNT(*) value FROM filtered GROUP BY severity_rank ORDER BY severity_rank DESC`).bind(...bindings).all<{ severity_rank: number; value: number }>();
-  const vendorRows = await db.prepare(`${cte} SELECT vendor, COUNT(*) value FROM filtered GROUP BY vendor ORDER BY value DESC LIMIT 12`).bind(...bindings).all<{ vendor: string; value: number }>();
-  const productSeries = await queryProductSeries(db, cte, bindings, params.get("vendor"));
-  const changes = await queryChanges(db, cte, bindings);
-  const recentChanges = await queryRecentChanges(db, cte, bindings);
-  const sourceHealth = await querySourceHealth(db);
-  const latestReleaseEvent = await queryLatestReleaseEvent(db);
-  const [activity, epssMovers, emergingVulnerabilities, vendorThreatSeries, changeCategoryCounts, cweAnalytics] = await Promise.all([
+  const [
+    rowsResult, summary, severityRows, vendorRows, productSeries, changes,
+    recentChanges, sourceHealth, latestReleaseEvent, activity, epssMovers,
+    emergingVulnerabilities, vendorThreatSeries, changeCategoryCounts, cweAnalytics,
+  ] = await Promise.all([
+    db.prepare(`${cte} SELECT * FROM filtered ORDER BY ${sort} LIMIT ? OFFSET ?`).bind(...bindings, limit + 1, offset).all<BaseRow>(),
+    db.prepare(`${cte} SELECT COUNT(*) total, COALESCE(SUM(severity_rank=4),0) critical, COALESCE(SUM(severity_rank=3),0) high, COALESCE(SUM(known_exploited),0) known_exploited, COALESCE(SUM(kev),0) kev, COALESCE(SUM(zero_day),0) zero_day, COALESCE(SUM(patch_available=1),0) patch_available, COALESCE(SUM(kev=1 OR known_exploited=1),0) p1, COALESCE(SUM(kev=0 AND known_exploited=0 AND ((severity_rank=4 AND epss_percentile>=?) OR (severity_rank=3 AND epss_percentile>=?))),0) p2 FROM filtered`).bind(...bindings, PRIORITY_THRESHOLDS.criticalHighEpssPercentile, PRIORITY_THRESHOLDS.highVeryHighEpssPercentile).first<Record<string, number>>(),
+    db.prepare(`${cte} SELECT severity_rank, COUNT(*) value FROM filtered GROUP BY severity_rank ORDER BY severity_rank DESC`).bind(...bindings).all<{ severity_rank: number; value: number }>(),
+    db.prepare(`${cte} SELECT vendor, COUNT(*) value FROM filtered GROUP BY vendor ORDER BY value DESC LIMIT 12`).bind(...bindings).all<{ vendor: string; value: number }>(),
+    queryProductSeries(db, cte, bindings, params.get("vendor")),
+    queryChanges(db, cte, bindings),
+    queryRecentChanges(db, cte, bindings),
+    querySourceHealth(db),
+    queryLatestReleaseEvent(db),
     queryActivity(db, cte, bindings),
     queryEpssMovers(db, cte, bindings),
     queryEmergingVulnerabilities(db, cte, bindings),
@@ -38,6 +35,11 @@ export async function queryDashboard(db: D1Database, url: URL): Promise<Dashboar
     queryChangeCategoryCounts(db, cte, bindings),
     queryCweAnalytics(db, cte, bindings),
   ]);
+  const allRows = rowsResult.results ?? [];
+  const hasMore = allRows.length > limit;
+  const rows = allRows.slice(0, limit).map(toDashboardRow);
+  const total = Number(summary?.total ?? 0);
+  const p1 = Number(summary?.p1 ?? 0); const p2 = Number(summary?.p2 ?? 0);
 
   return {
     generatedAt: new Date().toISOString(),
@@ -144,8 +146,10 @@ async function queryChangeCategoryCounts(db: D1Database, cte: string, bindings: 
 }
 
 async function queryCweAnalytics(db: D1Database, cte: string, bindings: unknown[]): Promise<DashboardResponse["cweAnalytics"]> {
-  const coverage = await db.prepare(`${cte} SELECT COUNT(*) total, COALESCE(SUM(c.cwe IS NOT NULL AND trim(c.cwe)<>''),0) known FROM filtered f JOIN cves c ON c.id=f.cve_id`).bind(...bindings).first<Record<string, number>>();
-  const series = await db.prepare(`${cte} SELECT c.cwe label, COUNT(*) value, COALESCE(SUM(f.severity_rank=4),0) critical, COALESCE(SUM(f.known_exploited),0) exploited FROM filtered f JOIN cves c ON c.id=f.cve_id WHERE c.cwe IS NOT NULL AND trim(c.cwe)<>'' GROUP BY c.cwe ORDER BY value DESC LIMIT 10`).bind(...bindings).all<Record<string, unknown>>();
+  const [coverage, series] = await Promise.all([
+    db.prepare(`${cte} SELECT COUNT(*) total, COALESCE(SUM(c.cwe IS NOT NULL AND trim(c.cwe)<>''),0) known FROM filtered f JOIN cves c ON c.id=f.cve_id`).bind(...bindings).first<Record<string, number>>(),
+    db.prepare(`${cte} SELECT c.cwe label, COUNT(*) value, COALESCE(SUM(f.severity_rank=4),0) critical, COALESCE(SUM(f.known_exploited),0) exploited FROM filtered f JOIN cves c ON c.id=f.cve_id WHERE c.cwe IS NOT NULL AND trim(c.cwe)<>'' GROUP BY c.cwe ORDER BY value DESC LIMIT 10`).bind(...bindings).all<Record<string, unknown>>(),
+  ]);
   return { knownCoverage: Number(coverage?.known ?? 0), total: Number(coverage?.total ?? 0), series: (series.results ?? []).map((row) => ({ label: String(row.label), value: Number(row.value), critical: Number(row.critical), exploited: Number(row.exploited) })) };
 }
 
