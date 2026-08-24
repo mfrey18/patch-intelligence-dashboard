@@ -34,7 +34,12 @@ export function normalizeIngestionRequest(sourceId: string, request: IngestionRe
 
   const checkpointId = request.checkpointId ?? checkpointIdentity(sourceId, mode, coverageStart, coverageEnd);
   if (!/^[A-Za-z0-9:._-]{1,220}$/.test(checkpointId)) throw new Error("Invalid checkpoint identifier");
-  const windowEnd = boundedWindowEnd(coverageStart, coverageEnd, windowDaysForMode(mode));
+  // The implicit delta range is already exactly one bounded lookback. Treat it
+  // as a single inclusive window so a successful source does not leave a
+  // one-millisecond trailing checkpoint that scheduled ingestion must replay.
+  const windowEnd = mode === "delta" && !request.since && !request.until
+    ? coverageEnd
+    : boundedWindowEnd(coverageStart, coverageEnd, windowDaysForMode(mode));
   return { id: checkpointId, sourceId, mode, coverageStart: coverageStart.toISOString(), coverageEnd: coverageEnd.toISOString(), windowStart: coverageStart.toISOString(), windowEnd: windowEnd.toISOString() };
 }
 

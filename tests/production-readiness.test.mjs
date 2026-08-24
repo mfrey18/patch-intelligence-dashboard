@@ -22,7 +22,7 @@ test("delta, replay, backfill, and Patch Tuesday requests create bounded determi
   const now = new Date("2026-08-21T12:00:00.000Z");
   const delta = normalizeIngestionRequest("microsoft-msrc-csaf", { mode: "delta" }, now);
   assert.equal(delta.windowStart, "2026-08-18T12:00:00.000Z");
-  assert.equal(delta.windowEnd, "2026-08-21T11:59:59.999Z");
+  assert.equal(delta.windowEnd, "2026-08-21T12:00:00.000Z");
   assert.match(delta.id, /^microsoft-msrc-csaf:delta:/);
 
   const backfill = normalizeIngestionRequest("microsoft-msrc-csaf", { mode: "backfill" }, now);
@@ -34,6 +34,34 @@ test("delta, replay, backfill, and Patch Tuesday requests create bounded determi
 
   assert.throws(() => normalizeIngestionRequest("microsoft-msrc-csaf", { mode: "replay" }, now), /requires explicit/);
   assert.throws(() => normalizeIngestionRequest("microsoft-msrc-csaf", { mode: "backfill", since: "2026-02-20T23:59:59.999Z" }, now), /outside the rolling six-month/);
+});
+
+test("a default delta completes without a trailing checkpoint window", async () => {
+  const now = new Date("2026-08-21T12:00:00.000Z");
+  const planned = normalizeIngestionRequest("cisco-psirt-csaf", { mode: "delta" }, now);
+  const writes = [];
+  const db = {
+    prepare(sql) {
+      return { bind(...values) { return { async run() { writes.push({ sql, values }); return {}; } }; } };
+    },
+  };
+  const checkpoint = { ...planned, continuation: null, status: "running" };
+  const completed = await advanceCheckpoint(db, checkpoint, {
+    sourceId: checkpoint.sourceId,
+    runId: "run-success",
+    status: "unchanged",
+    mode: "delta",
+    window: { since: checkpoint.windowStart, until: checkpoint.windowEnd },
+    processed: 0,
+    continuation: null,
+    boundHit: false,
+    counts: { discovered: 0, inserted: 0, changed: 0, unchanged: 0, failed: 0 },
+    errors: [],
+    startedAt: now.toISOString(),
+    completedAt: now.toISOString(),
+  });
+  assert.equal(completed.status, "complete");
+  assert.match(writes.at(-1).sql, /status='complete'/);
 });
 
 test("persisted checkpoints resume by identifier and do not advance a failed window", async () => {
@@ -118,6 +146,7 @@ test("production workflows apply migrations before Worker deployment and seriali
   assert.match(pages, /group: production-deployment/);
   assert.match(ingestion, /ENABLE_SCHEDULED_INGESTION == 'true'/);
   assert.match(ingestion, /fail-fast: false/);
+  assert.match(ingestion, /source: microsoft-msrc-csaf, max_attempts: 50/, "Microsoft must have enough resumable Worker invocations for the observed change volume");
   assert.match(ingestion, /if \$checkpoint == "" then \{\} else \{checkpointId:\$checkpoint\} end/, "manual dispatch must omit blank checkpoint IDs");
   const dailyMatrix = ingestion.slice(ingestion.indexOf("matrix:"), ingestion.indexOf("name: Daily source"));
   for (const source of ["microsoft-msrc-csaf", "cisco-psirt-csaf", "cisa-kev", "first-epss", "palo-alto-psirt-csaf", "mozilla-mfsa-yaml"]) assert.match(dailyMatrix, new RegExp(source));

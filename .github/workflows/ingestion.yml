@@ -49,7 +49,10 @@ jobs:
         include:
           - { source: cisa-kev, max_attempts: 1 }
           - { source: first-epss, max_attempts: 1 }
-          - { source: microsoft-msrc-csaf, max_attempts: 10 }
+          # The live MSRC changes index can legitimately contain hundreds of
+          # recently modified documents. Each attempt remains capped at 12
+          # advisory fetches for Workers Free; the workflow resumes checkpoints.
+          - { source: microsoft-msrc-csaf, max_attempts: 50 }
           - { source: cisco-psirt-csaf, max_attempts: 4 }
           - { source: palo-alto-psirt-csaf, max_attempts: 4 }
           - { source: mozilla-mfsa-yaml, max_attempts: 4 }
