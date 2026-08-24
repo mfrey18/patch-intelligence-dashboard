@@ -29,6 +29,11 @@ on:
         description: Stable identifier for a resumed replay/backfill
         required: false
         type: string
+      max_attempts:
+        description: Bounded Worker invocations in this run (1-50)
+        required: false
+        default: "10"
+        type: string
 
 permissions:
   contents: read
@@ -122,15 +127,26 @@ jobs:
           SINCE: ${{ inputs.since }}
           UNTIL: ${{ inputs.until }}
           CHECKPOINT_ID: ${{ inputs.checkpoint_id }}
+          MAX_ATTEMPTS: ${{ inputs.max_attempts }}
         run: |
           test -n "$API_ORIGIN" && test -n "$INGEST_SECRET"
-          jq -n --arg source "$SOURCE_ID" --arg mode "$MODE" --arg since "$SINCE" --arg until "$UNTIL" --arg checkpoint "$CHECKPOINT_ID" '
-            {sources:[$source],mode:$mode,maxItems:12}
-            + (if $since == "" then {} else {since:$since} end)
-            + (if $until == "" then {} else {until:$until} end)
-            + (if $checkpoint == "" then {} else {checkpointId:$checkpoint} end)
-          ' |
-            curl --fail-with-body --silent --show-error -X POST -H "Authorization: Bearer $INGEST_SECRET" -H "content-type: application/json" --data-binary @- "$API_ORIGIN/api/internal/ingest"
+          case "$MAX_ATTEMPTS" in ''|*[!0-9]*) echo "max_attempts must be an integer" >&2; exit 1;; esac
+          test "$MAX_ATTEMPTS" -ge 1 && test "$MAX_ATTEMPTS" -le 50
+          checkpoint="$CHECKPOINT_ID"
+          if [ -z "$checkpoint" ] && [ "$MODE" = "backfill" ]; then checkpoint="backfill:${SOURCE_ID}:six-month"; fi
+          for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
+            response="$(jq -n --arg source "$SOURCE_ID" --arg mode "$MODE" --arg since "$SINCE" --arg until "$UNTIL" --arg checkpoint "$checkpoint" '
+              {sources:[$source],mode:$mode,maxItems:12}
+              + (if $since == "" then {} else {since:$since} end)
+              + (if $until == "" then {} else {until:$until} end)
+              + (if $checkpoint == "" then {} else {checkpointId:$checkpoint} end)
+            ' | curl --fail-with-body --silent --show-error -X POST -H "Authorization: Bearer $INGEST_SECRET" -H "content-type: application/json" --data-binary @- "$API_ORIGIN/api/internal/ingest")"
+            echo "$response" | jq .
+            if [ "$(echo "$response" | jq -r '.results[0].status')" = "failed" ]; then exit 1; fi
+            state="$(echo "$response" | jq -r '.results[0].checkpoint.status // "complete"')"
+            if [ "$state" = "complete" ]; then exit 0; fi
+          done
+          echo "Checkpoint remains resumable after $MAX_ATTEMPTS bounded Worker invocations."
 
   housekeeping:
     if: always() && github.event_name == 'schedule' && github.event.schedule == '17 7 * * *' && vars.ENABLE_SCHEDULED_INGESTION == 'true'
