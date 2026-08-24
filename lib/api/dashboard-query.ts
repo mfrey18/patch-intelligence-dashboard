@@ -131,7 +131,7 @@ async function queryVendorThreatSeries(db: D1Database, cte: string, bindings: un
 async function queryProductSeries(db: D1Database, cte: string, bindings: unknown[], vendorId: string | null): Promise<DashboardResponse["productSeries"]> {
   const result = await db.prepare(`${cte} SELECT COALESCE(p.family,p.name) label, COUNT(DISTINCT f.cve_id) value
     FROM filtered f JOIN advisory_cves pac ON pac.cve_id=f.cve_id JOIN advisories pa ON pa.id=pac.advisory_id
-    JOIN advisory_revisions par ON par.id=(SELECT par2.id FROM advisory_revisions par2 WHERE par2.advisory_id=pa.id ORDER BY par2.observed_at DESC LIMIT 1)
+    JOIN latest_revisions par ON par.advisory_id=pa.id
     JOIN affected_products pap ON pap.advisory_id=pa.id AND pap.advisory_revision_id=par.id AND (pap.cve_id=f.cve_id OR pap.cve_id IS NULL)
     JOIN products p ON p.id=pap.product_id WHERE (?='' OR pa.vendor_id=?)
     GROUP BY COALESCE(p.family,p.name) ORDER BY value DESC, label LIMIT 12`).bind(...bindings, vendorId ?? "", vendorId ?? "").all<{ label: string; value: number }>();
@@ -177,9 +177,6 @@ function buildFilteredCte(params: URLSearchParams): { cte: string; bindings: unk
   booleanFilter("kev", "EXISTS(SELECT 1 FROM kev_entries kf WHERE kf.cve_id=c.id AND kf.active=1)");
   booleanFilter("exploited", "EXISTS(SELECT 1 FROM exploit_evidence ef WHERE ef.cve_id=c.id AND ef.evidence_type='known_exploitation' AND ef.status='confirmed')");
   booleanFilter("zeroDay", "EXISTS(SELECT 1 FROM exploit_evidence zf WHERE zf.cve_id=c.id AND zf.evidence_type='zero_day' AND zf.status='confirmed')");
-  booleanFilter("patchAvailable", "EXISTS(SELECT 1 FROM remediations rf WHERE (rf.cve_id=c.id OR (rf.cve_id IS NULL AND EXISTS(SELECT 1 FROM advisory_cves rac WHERE rac.advisory_id=rf.advisory_id AND rac.cve_id=c.id))) AND rf.patch_available=1 AND rf.advisory_revision_id=(SELECT rr.id FROM advisory_revisions rr WHERE rr.advisory_id=rf.advisory_id ORDER BY rr.observed_at DESC LIMIT 1))");
-  booleanFilter("mitigationAvailable", "EXISTS(SELECT 1 FROM remediations mf WHERE (mf.cve_id=c.id OR (mf.cve_id IS NULL AND EXISTS(SELECT 1 FROM advisory_cves mac WHERE mac.advisory_id=mf.advisory_id AND mac.cve_id=c.id))) AND mf.kind='mitigation' AND mf.advisory_revision_id=(SELECT mr.id FROM advisory_revisions mr WHERE mr.advisory_id=mf.advisory_id ORDER BY mr.observed_at DESC LIMIT 1))");
-  booleanFilter("workaroundAvailable", "EXISTS(SELECT 1 FROM remediations wf WHERE (wf.cve_id=c.id OR (wf.cve_id IS NULL AND EXISTS(SELECT 1 FROM advisory_cves wac WHERE wac.advisory_id=wf.advisory_id AND wac.cve_id=c.id))) AND wf.kind='workaround' AND wf.advisory_revision_id=(SELECT wr.id FROM advisory_revisions wr WHERE wr.advisory_id=wf.advisory_id ORDER BY wr.observed_at DESC LIMIT 1))");
 
   const outer = ["1=1"];
   const addOuter = (condition: string, ...values: unknown[]) => { outer.push(condition); bindings.push(...values); };
@@ -187,37 +184,63 @@ function buildFilteredCte(params: URLSearchParams): { cte: string; bindings: unk
   if (finiteParam(params, "cvssMax") != null) addOuter("cvss <= ?", finiteParam(params, "cvssMax"));
   if (finiteParam(params, "epssPercentileMin") != null) addOuter("epss_percentile >= ?", finiteParam(params, "epssPercentileMin"));
   if (finiteParam(params, "epssMin") != null) addOuter("epss >= ?", finiteParam(params, "epssMin"));
+  booleanFilterOuter(params, addOuter, "patchAvailable", "patch_available");
+  booleanFilterOuter(params, addOuter, "mitigationAvailable", "mitigation_available");
+  booleanFilterOuter(params, addOuter, "workaroundAvailable", "workaround_available");
   const priority = params.get("priority")?.toUpperCase();
   if (priority === "P1") outer.push("(kev=1 OR known_exploited=1)");
   if (priority === "P2") { outer.push("kev=0 AND known_exploited=0 AND ((severity_rank=4 AND epss_percentile>=?) OR (severity_rank=3 AND epss_percentile>=?))"); bindings.push(PRIORITY_THRESHOLDS.criticalHighEpssPercentile, PRIORITY_THRESHOLDS.highVeryHighEpssPercentile); }
   if (priority === "P3") { outer.push("kev=0 AND known_exploited=0 AND NOT ((severity_rank=4 AND COALESCE(epss_percentile,0)>=?) OR (severity_rank=3 AND COALESCE(epss_percentile,0)>=?))"); bindings.push(PRIORITY_THRESHOLDS.criticalHighEpssPercentile, PRIORITY_THRESHOLDS.highVeryHighEpssPercentile); }
 
-  const currentRemediation = (alias: string) => `(${alias}.cve_id=c.id OR (${alias}.cve_id IS NULL AND EXISTS(SELECT 1 FROM advisory_cves ${alias}ac WHERE ${alias}ac.advisory_id=${alias}.advisory_id AND ${alias}ac.cve_id=c.id))) AND ${alias}.advisory_revision_id=(SELECT ${alias}r.id FROM advisory_revisions ${alias}r WHERE ${alias}r.advisory_id=${alias}.advisory_id ORDER BY ${alias}r.observed_at DESC LIMIT 1)`;
   const cte = `WITH current_epss AS (
     SELECT eo.cve_id, eo.score, eo.percentile FROM epss_observations eo JOIN epss_datasets ed ON ed.score_date=eo.score_date AND ed.is_current=1
+  ), latest_revisions AS (
+    SELECT ar.id, ar.advisory_id FROM advisory_revisions ar
+    WHERE ar.id=(SELECT ar2.id FROM advisory_revisions ar2 WHERE ar2.advisory_id=ar.advisory_id ORDER BY ar2.observed_at DESC LIMIT 1)
+  ), current_remediation_rows AS (
+    SELECT r.cve_id, r.advisory_id, r.patch_available, r.kind
+    FROM remediations r JOIN latest_revisions lr ON lr.id=r.advisory_revision_id
+  ), remediation_assertions AS (
+    SELECT cve_id, patch_available, kind FROM current_remediation_rows WHERE cve_id IS NOT NULL
+    UNION ALL
+    SELECT ac.cve_id, r.patch_available, r.kind
+    FROM current_remediation_rows r JOIN advisory_cves ac ON ac.advisory_id=r.advisory_id
+    WHERE r.cve_id IS NULL
+  ), remediation_flags AS (
+    SELECT cve_id,
+      MAX(CASE WHEN patch_available=1 THEN 1 WHEN patch_available=0 THEN 0 ELSE NULL END) patch_available,
+      MAX(CASE WHEN kind='mitigation' THEN 1 ELSE 0 END) mitigation_available,
+      MAX(CASE WHEN kind='workaround' THEN 1 ELSE 0 END) workaround_available
+    FROM remediation_assertions GROUP BY cve_id
   ), base AS (
     SELECT c.id cve_id, COALESCE(c.description, MAX(CASE WHEN a.id IS NOT NULL THEN ac.vendor_description END), MAX(a.title), c.id) title,
       COALESCE(GROUP_CONCAT(DISTINCT v.name),'CISA KEV') vendor,
-      (SELECT GROUP_CONCAT(DISTINCT pp.name) FROM advisory_cves pac JOIN advisories pa ON pa.id=pac.advisory_id JOIN affected_products pap ON pap.advisory_id=pa.id AND (pap.cve_id=c.id OR pap.cve_id IS NULL) AND pap.advisory_revision_id=(SELECT par.id FROM advisory_revisions par WHERE par.advisory_id=pa.id ORDER BY par.observed_at DESC LIMIT 1) JOIN products pp ON pp.id=pap.product_id WHERE pac.cve_id=c.id AND COALESCE(pa.published_at,pa.source_updated_at)>=date('now','-${INTELLIGENCE_WINDOW_MONTHS} months')) product,
+      (SELECT GROUP_CONCAT(DISTINCT pp.name) FROM advisory_cves pac JOIN advisories pa ON pa.id=pac.advisory_id JOIN latest_revisions par ON par.advisory_id=pa.id JOIN affected_products pap ON pap.advisory_id=pa.id AND (pap.cve_id=c.id OR pap.cve_id IS NULL) AND pap.advisory_revision_id=par.id JOIN products pp ON pp.id=pap.product_id WHERE pac.cve_id=c.id AND COALESCE(pa.published_at,pa.source_updated_at)>=date('now','-${INTELLIGENCE_WINDOW_MONTHS} months')) product,
       MAX(CASE WHEN a.id IS NULL THEN 0 ELSE CASE ac.normalized_severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END END) severity_rank,
       MAX(CASE WHEN a.id IS NOT NULL THEN ac.vendor_cvss_score END) cvss, ce.score epss, ce.percentile epss_percentile,
       CASE WHEN EXISTS(SELECT 1 FROM kev_entries k WHERE k.cve_id=c.id AND k.active=1) THEN 1 ELSE 0 END kev,
       CASE WHEN EXISTS(SELECT 1 FROM exploit_evidence ee WHERE ee.cve_id=c.id AND ee.evidence_type='known_exploitation' AND ee.status='confirmed') THEN 1 ELSE 0 END known_exploited,
       CASE WHEN EXISTS(SELECT 1 FROM exploit_evidence ee WHERE ee.cve_id=c.id AND ee.evidence_type='zero_day' AND ee.status='confirmed') THEN 1 ELSE 0 END zero_day,
-      (SELECT MAX(CASE WHEN rp.patch_available=1 THEN 1 WHEN rp.patch_available=0 THEN 0 ELSE NULL END) FROM remediations rp WHERE ${currentRemediation("rp")}) patch_available,
-      CASE WHEN EXISTS(SELECT 1 FROM remediations rm WHERE ${currentRemediation("rm")} AND rm.kind='mitigation') THEN 1 ELSE 0 END mitigation_available,
-      CASE WHEN EXISTS(SELECT 1 FROM remediations rw WHERE ${currentRemediation("rw")} AND rw.kind='workaround') THEN 1 ELSE 0 END workaround_available,
+      MAX(rf.patch_available) patch_available,
+      COALESCE(MAX(rf.mitigation_available),0) mitigation_available,
+      COALESCE(MAX(rf.workaround_available),0) workaround_available,
       MIN(a.published_at) published_at, MAX(a.source_updated_at) modified_at
     FROM cves c
       LEFT JOIN advisory_cves ac ON ac.cve_id=c.id
       LEFT JOIN advisories a ON a.id=ac.advisory_id AND COALESCE(a.published_at,a.source_updated_at)>=date('now','-${INTELLIGENCE_WINDOW_MONTHS} months')
       LEFT JOIN vendors v ON v.id=a.vendor_id
-      LEFT JOIN advisory_revisions ar ON ar.id=(SELECT ar2.id FROM advisory_revisions ar2 WHERE ar2.advisory_id=a.id ORDER BY ar2.observed_at DESC LIMIT 1)
+      LEFT JOIN latest_revisions ar ON ar.advisory_id=a.id
       LEFT JOIN current_epss ce ON ce.cve_id=c.id
+      LEFT JOIN remediation_flags rf ON rf.cve_id=c.id
     WHERE (a.id IS NOT NULL OR EXISTS(SELECT 1 FROM kev_entries scope_kev WHERE scope_kev.cve_id=c.id AND scope_kev.active=1 AND date(scope_kev.date_added)>=date('now','-${INTELLIGENCE_WINDOW_MONTHS} months'))) AND ${where.join(" AND ")}
     GROUP BY c.id, ce.score, ce.percentile
   ), filtered AS (SELECT * FROM base WHERE ${outer.join(" AND ")})`;
   return { cte, bindings };
+}
+
+function booleanFilterOuter(params: URLSearchParams, add: (condition: string, ...values: unknown[]) => void, key: string, expression: string): void {
+  const value = params.get(key);
+  if (value === "true" || value === "false") add(`${expression} = ?`, value === "true" ? 1 : 0);
 }
 
 async function queryChanges(db: D1Database, cte: string, bindings: unknown[]): Promise<DashboardResponse["changes"]> {
