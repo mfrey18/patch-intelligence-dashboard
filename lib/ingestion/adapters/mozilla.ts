@@ -1,18 +1,22 @@
 import type { NormalizedAdvisory, NormalizedAffectedProduct, NormalizedRemediation } from "../../domain/types";
 import type { AdvisoryRef, RawAdvisory, VendorAdapter } from "../contracts";
-import { defaultDiscoveryStart } from "../operational-policy";
 import { fetchWithPolicy, readJsonLimited, readTextLimited } from "../safety";
 import { iso, normalizeSeverity, uniqueBy, validCve } from "./utils";
 
-const REPOSITORY_ROOT = "https://api.github.com/repos/mozilla/foundation-security-advisories/contents/announce";
+const REPOSITORY_COMMITS = "https://api.github.com/repos/mozilla/foundation-security-advisories/commits";
+const REPOSITORY_API_ORIGIN = "https://api.github.com";
+const REPOSITORY_PATH = "announce";
 const RAW_HOST = "raw.githubusercontent.com";
 
-interface GithubContentEntry {
-  name?: unknown;
-  path?: unknown;
+interface GithubCommitEntry {
   sha?: unknown;
-  download_url?: unknown;
-  type?: unknown;
+  url?: unknown;
+  commit?: { committer?: { date?: unknown } };
+}
+
+interface GithubCommitFile {
+  filename?: unknown;
+  status?: unknown;
 }
 
 interface ParsedMozillaCve {
@@ -35,31 +39,44 @@ export const mozillaAdapter: VendorAdapter = {
   vendor: "mozilla",
   sourceId: "mozilla-mfsa-yaml",
   async discover(ctx) {
-    const start = validDate(ctx.since) ?? defaultDiscoveryStart();
-    const end = validDate(ctx.until) ?? new Date();
+    const start = validDate(ctx.since);
+    const end = validDate(ctx.until);
+    if (!start || !end || start > end) throw new Error("Mozilla discovery requires a bounded valid date range");
     const refs = new Map<string, AdvisoryRef>();
 
-    for (let year = start.getUTCFullYear(); year <= end.getUTCFullYear(); year += 1) {
-      const response = await fetchWithPolicy(`${REPOSITORY_ROOT}/${year}`, ctx.policy, {
-        headers: { accept: "application/vnd.github+json", "user-agent": "Patch-Intelligence-Dashboard" },
-      }, [404]);
-      if (response.status === 404) continue;
-      const payload = await readJsonLimited(response, ctx.policy.maxResponseBytes);
-      if (!Array.isArray(payload)) throw new Error(`Mozilla advisory index for ${year} is not an array`);
+    const indexUrl = new URL(REPOSITORY_COMMITS);
+    indexUrl.searchParams.set("path", REPOSITORY_PATH);
+    indexUrl.searchParams.set("since", start.toISOString());
+    indexUrl.searchParams.set("until", end.toISOString());
+    indexUrl.searchParams.set("per_page", "100");
+    const indexResponse = await fetchWithPolicy(indexUrl.toString(), ctx.policy, { headers: githubHeaders() });
+    if (/rel="next"/.test(indexResponse.headers.get("link") ?? "")) throw new Error("Mozilla commit discovery exceeded the 100-commit window; use a narrower replay/backfill window");
+    const commits = await readJsonLimited(indexResponse, ctx.policy.maxResponseBytes);
+    if (!Array.isArray(commits)) throw new Error("Mozilla advisory commit index is not an array");
 
-      for (const value of payload as GithubContentEntry[]) {
-        if (value.type !== "file" || typeof value.name !== "string" || typeof value.download_url !== "string") continue;
-        const match = /^(mfsa\d{4}-\d+)\.ya?ml$/i.exec(value.name);
+    // Commit detail is authoritative for the exact files added or modified.
+    // Bounded ingestion windows keep this well below Workers Free's 50-fetch cap.
+    for (const commit of commits as GithubCommitEntry[]) {
+      if (typeof commit.sha !== "string" || !/^[a-f0-9]{40}$/i.test(commit.sha) || typeof commit.url !== "string") continue;
+      const detailUrl = new URL(commit.url);
+      if (detailUrl.origin !== REPOSITORY_API_ORIGIN || !detailUrl.pathname.startsWith("/repos/mozilla/foundation-security-advisories/commits/")) continue;
+      const detailResponse = await fetchWithPolicy(detailUrl.toString(), ctx.policy, { headers: githubHeaders() });
+      const detail = await readJsonLimited(detailResponse, ctx.policy.maxResponseBytes) as { files?: GithubCommitFile[] };
+      const sourceUpdatedAt = iso(commit.commit?.committer?.date);
+      for (const file of Array.isArray(detail.files) ? detail.files : []) {
+        if (file.status === "removed" || typeof file.filename !== "string") continue;
+        const match = /^announce\/(\d{4})\/(mfsa\d{4}-\d+)\.ya?ml$/i.exec(file.filename);
         if (!match) continue;
-        const url = new URL(value.download_url);
-        if (url.protocol !== "https:" || url.hostname !== RAW_HOST) continue;
-        const id = match[1].toLowerCase();
+        const id = match[2].toLowerCase();
+        const current = refs.get(id);
+        if (current?.sourceUpdatedAt && sourceUpdatedAt && current.sourceUpdatedAt >= sourceUpdatedAt) continue;
         refs.set(id, {
           id,
-          url: url.toString(),
+          url: `https://${RAW_HOST}/mozilla/foundation-security-advisories/${commit.sha}/${file.filename}`,
+          sourceUpdatedAt,
           metadata: {
-            repositoryPath: typeof value.path === "string" ? value.path : `announce/${year}/${value.name}`,
-            repositorySha: typeof value.sha === "string" ? value.sha : "",
+            repositoryPath: file.filename,
+            repositorySha: commit.sha,
             publicationUrl: `https://www.mozilla.org/security/advisories/${id}/`,
           },
         });
@@ -86,6 +103,10 @@ export const mozillaAdapter: VendorAdapter = {
     return [normalizeMozillaMfsa(raw, ctx.sanitizeText)];
   },
 };
+
+function githubHeaders(): Record<string, string> {
+  return { accept: "application/vnd.github+json", "user-agent": "Patch-Intelligence-Dashboard", "x-github-api-version": "2022-11-28" };
+}
 
 export function normalizeMozillaMfsa(raw: RawAdvisory, sanitize: (value: unknown) => string | undefined): NormalizedAdvisory {
   if (typeof raw.body !== "string") throw new Error("Mozilla MFSA payload must be YAML text");

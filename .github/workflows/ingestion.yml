@@ -46,7 +46,13 @@ jobs:
       fail-fast: false
       max-parallel: 4
       matrix:
-        source: [cisa-kev, first-epss, microsoft-msrc-csaf, cisco-psirt-csaf, palo-alto-psirt-csaf, ivanti-security-advisory-rss, mozilla-mfsa-yaml, oracle-cpu-csaf, atlassian-vulnerability-api]
+        include:
+          - { source: cisa-kev, max_attempts: 1 }
+          - { source: first-epss, max_attempts: 1 }
+          - { source: microsoft-msrc-csaf, max_attempts: 10 }
+          - { source: cisco-psirt-csaf, max_attempts: 4 }
+          - { source: palo-alto-psirt-csaf, max_attempts: 4 }
+          - { source: mozilla-mfsa-yaml, max_attempts: 4 }
     name: Daily source — ${{ matrix.source }}
     steps:
       - name: Run isolated source delta
@@ -54,10 +60,11 @@ jobs:
           API_ORIGIN: ${{ vars.PUBLIC_API_BASE_URL }}
           INGEST_SECRET: ${{ secrets.INGEST_SECRET }}
           SOURCE_ID: ${{ matrix.source }}
+          MAX_ATTEMPTS: ${{ matrix.max_attempts }}
         run: |
           test -n "$API_ORIGIN" && test -n "$INGEST_SECRET"
           checkpoint="daily:${SOURCE_ID}:$(date -u +%Y-%m-%d)"
-          for attempt in 1 2 3 4; do
+          for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
             response="$(jq -n --arg source "$SOURCE_ID" --arg checkpoint "$checkpoint" '{sources:[$source],mode:"delta",checkpointId:$checkpoint}' |
               curl --fail-with-body --silent --show-error -X POST -H "Authorization: Bearer $INGEST_SECRET" -H "content-type: application/json" --data-binary @- "$API_ORIGIN/api/internal/ingest")"
             echo "$response" | jq .
@@ -114,7 +121,12 @@ jobs:
           CHECKPOINT_ID: ${{ inputs.checkpoint_id }}
         run: |
           test -n "$API_ORIGIN" && test -n "$INGEST_SECRET"
-          jq -n --arg source "$SOURCE_ID" --arg mode "$MODE" --arg since "$SINCE" --arg until "$UNTIL" --arg checkpoint "$CHECKPOINT_ID" '{sources:[$source],mode:$mode,since:$since,until:$until,checkpointId:$checkpoint,maxItems:12}' |
+          jq -n --arg source "$SOURCE_ID" --arg mode "$MODE" --arg since "$SINCE" --arg until "$UNTIL" --arg checkpoint "$CHECKPOINT_ID" '
+            {sources:[$source],mode:$mode,maxItems:12}
+            + (if $since == "" then {} else {since:$since} end)
+            + (if $until == "" then {} else {until:$until} end)
+            + (if $checkpoint == "" then {} else {checkpointId:$checkpoint} end)
+          ' |
             curl --fail-with-body --silent --show-error -X POST -H "Authorization: Bearer $INGEST_SECRET" -H "content-type: application/json" --data-binary @- "$API_ORIGIN/api/internal/ingest"
 
   housekeeping:
@@ -135,5 +147,5 @@ jobs:
         run: |
           dashboard="$(curl --fail --silent --show-error "$API_ORIGIN/api/dashboard?limit=1")"
           echo "$dashboard" | jq '.sourceHealth'
-          expected='["cisa-kev","first-epss","microsoft-msrc-csaf","cisco-psirt-csaf","palo-alto-psirt-csaf","ivanti-security-advisory-rss","mozilla-mfsa-yaml","oracle-cpu-csaf","atlassian-vulnerability-api"]'
+          expected='["cisa-kev","first-epss","microsoft-msrc-csaf","cisco-psirt-csaf","palo-alto-psirt-csaf","mozilla-mfsa-yaml"]'
           echo "$dashboard" | jq -e --argjson expected "$expected" '[.sourceHealth[] | select(.sourceId as $id | $expected | index($id)) | select(.freshness != "fresh" or .result == "failed" or .lease.active == true)] | length == 0'
