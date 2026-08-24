@@ -118,6 +118,10 @@ test("production workflows apply migrations before Worker deployment and seriali
   assert.match(pages, /group: production-deployment/);
   assert.match(ingestion, /ENABLE_SCHEDULED_INGESTION == 'true'/);
   assert.match(ingestion, /fail-fast: false/);
+  assert.match(ingestion, /if \$checkpoint == "" then \{\} else \{checkpointId:\$checkpoint\} end/, "manual dispatch must omit blank checkpoint IDs");
+  const dailyMatrix = ingestion.slice(ingestion.indexOf("matrix:"), ingestion.indexOf("name: Daily source"));
+  for (const source of ["microsoft-msrc-csaf", "cisco-psirt-csaf", "cisa-kev", "first-epss", "palo-alto-psirt-csaf", "mozilla-mfsa-yaml"]) assert.match(dailyMatrix, new RegExp(source));
+  for (const quarantined of ["ivanti-security-advisory-rss", "oracle-cpu-csaf", "atlassian-vulnerability-api"]) assert.doesNotMatch(dailyMatrix, new RegExp(quarantined));
   assert.doesNotMatch(ingestion, /sources:\s*\[[^\]]+,[^\]]+\]/, "each request must contain one source");
   assert.doesNotMatch(vite, /limits:\s*\{/, "Workers Free deployments must use platform limits rather than paid-plan runtime limits");
 });

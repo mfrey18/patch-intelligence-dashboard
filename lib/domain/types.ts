@@ -62,7 +62,7 @@ export interface NormalizedExploitEvidence {
 
 export interface NormalizedReleaseEvent {
   id: string;
-  eventType: "patch_tuesday" | "security_release" | "quarterly_cpu" | "vendor_release";
+  eventType: "patch_tuesday" | "security_release" | "quarterly_cpu" | "critical_security_patch_update" | "vendor_release";
   eventDate: string;
   label: string;
   sourceUrl?: string;

@@ -6,7 +6,7 @@ import { makeAtlassianRaw, makeConfiguredCsaf, makeOracleCsaf } from "./fixtures
 
 const { createAppleAdapter, normalizeAppleCsaf } = await import("../lib/ingestion/adapters/apple.ts");
 const { normalizeAtlassianVulnerability } = await import("../lib/ingestion/adapters/atlassian.ts");
-const { normalizeOracleCsaf, oracleCpuCandidates } = await import("../lib/ingestion/adapters/oracle.ts");
+const { normalizeOracleCsaf, oracleCpuCandidates, oracleCsafCandidates } = await import("../lib/ingestion/adapters/oracle.ts");
 const { createSapAdapter, normalizeSapCsaf } = await import("../lib/ingestion/adapters/sap.ts");
 
 const sanitize = (value) => typeof value === "string" ? value.trim().replace(/\s+/g, " ") : undefined;
@@ -53,6 +53,21 @@ test("Oracle quarterly discovery generates only deterministic official CSAF JSON
   const refs = oracleCpuCandidates(new Date("2025-01-01T00:00:00Z"), new Date("2025-12-31T23:59:59Z"));
   assert.deepEqual(refs.map((ref) => ref.id), ["cpujan2025", "cpuapr2025", "cpujul2025", "cpuoct2025"]);
   assert.ok(refs.every((ref) => /^https:\/\/www\.oracle\.com\/a\/tech\/docs\/security-alerts\/cpu(?:jan|apr|jul|oct)2025csaf\.json$/.test(ref.url)));
+});
+
+test("Oracle discovery includes official CSPU CSAF publications beginning in May 2026", () => {
+  const refs = oracleCsafCandidates(new Date("2026-05-01T00:00:00Z"), new Date("2026-08-31T23:59:59Z"));
+  assert.deepEqual(refs.map((ref) => ref.id).sort(), ["cpujul2026", "cspuaug2026", "cspujun2026", "cspumay2026"]);
+  assert.ok(refs.every((ref) => /^https:\/\/www\.oracle\.com\/a\/tech\/docs\/security-alerts\/(?:cpu|cspu)[a-z]{3}2026csaf\.json$/.test(ref.url)));
+  assert.equal(oracleCsafCandidates(new Date("2025-05-01T00:00:00Z"), new Date("2025-06-30T23:59:59Z")).some((ref) => ref.id.startsWith("cspu")), false);
+});
+
+test("Oracle CSPU normalization creates a distinct reusable release event", () => {
+  const raw = makeOracleCsaf();
+  raw.ref.id = "cspuaug2026";
+  const advisory = normalizeOracleCsaf(raw, sanitize);
+  assert.equal(advisory.releaseEvent.eventType, "critical_security_patch_update");
+  assert.match(advisory.releaseEvent.label, /Critical Security Patch Update/);
 });
 
 test("Apple and SAP default adapters fail closed until authoritative feeds are configured", async () => {

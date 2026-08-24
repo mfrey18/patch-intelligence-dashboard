@@ -48,31 +48,39 @@ test("Mozilla normalization is idempotent and rejects incomplete YAML", () => {
 test("Mozilla discovers YAML files from its official repository only", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input) => {
-    assert.equal(String(input), "https://api.github.com/repos/mozilla/foundation-security-advisories/contents/announce/2026");
-    return new Response(JSON.stringify([
-      {
-        name: "mfsa2026-73.yml",
-        path: "announce/2026/mfsa2026-73.yml",
-        sha: "fixture-sha",
-        type: "file",
-        download_url: "https://raw.githubusercontent.com/mozilla/foundation-security-advisories/main/announce/2026/mfsa2026-73.yml",
-      },
-      { name: "notes.txt", type: "file", download_url: "https://example.com/notes.txt" },
-    ]), { headers: { "content-type": "application/json" } });
+    const url = String(input);
+    if (url.startsWith("https://api.github.com/repos/mozilla/foundation-security-advisories/commits?")) {
+      const parsed = new URL(url);
+      assert.equal(parsed.searchParams.get("path"), "announce");
+      assert.equal(parsed.searchParams.get("since"), "2026-08-18T00:00:00.000Z");
+      assert.equal(parsed.searchParams.get("until"), "2026-08-20T00:00:00.000Z");
+      return new Response(JSON.stringify([{
+        sha: "0123456789abcdef0123456789abcdef01234567",
+        url: "https://api.github.com/repos/mozilla/foundation-security-advisories/commits/0123456789abcdef0123456789abcdef01234567",
+        commit: { committer: { date: "2026-08-19T12:34:56Z" } },
+      }]), { headers: { "content-type": "application/json" } });
+    }
+    assert.equal(url, "https://api.github.com/repos/mozilla/foundation-security-advisories/commits/0123456789abcdef0123456789abcdef01234567");
+    return new Response(JSON.stringify({ files: [
+      { filename: "announce/2026/mfsa2026-73.yml", status: "modified" },
+      { filename: "announce/2026/notes.txt", status: "modified" },
+      { filename: "announce/2026/mfsa2026-72.yml", status: "removed" },
+    ] }), { headers: { "content-type": "application/json" } });
   };
   try {
     const refs = await mozillaAdapter.discover({
       fetch: globalThis.fetch,
-      since: "2026-01-01T00:00:00.000Z",
+      since: "2026-08-18T00:00:00.000Z",
       until: "2026-08-20T00:00:00.000Z",
       policy: { timeoutMs: 1_000, maxResponseBytes: 100_000, retries: 0, retryBaseMs: 1 },
     });
     assert.deepEqual(refs, [{
       id: "mfsa2026-73",
-      url: "https://raw.githubusercontent.com/mozilla/foundation-security-advisories/main/announce/2026/mfsa2026-73.yml",
+      url: "https://raw.githubusercontent.com/mozilla/foundation-security-advisories/0123456789abcdef0123456789abcdef01234567/announce/2026/mfsa2026-73.yml",
+      sourceUpdatedAt: "2026-08-19T12:34:56.000Z",
       metadata: {
         repositoryPath: "announce/2026/mfsa2026-73.yml",
-        repositorySha: "fixture-sha",
+        repositorySha: "0123456789abcdef0123456789abcdef01234567",
         publicationUrl: "https://www.mozilla.org/security/advisories/mfsa2026-73/",
       },
     }]);
