@@ -52,15 +52,17 @@ jobs:
       max-parallel: 4
       matrix:
         include:
-          - { source: cisa-kev, max_attempts: 1 }
-          - { source: first-epss, max_attempts: 1 }
+          - { source: cisa-kev, max_attempts: 1, batch_size: 12 }
+          - { source: first-epss, max_attempts: 1, batch_size: 12 }
           # The live MSRC changes index can legitimately contain hundreds of
           # recently modified documents. Each attempt remains capped at 12
           # advisory fetches for Workers Free; the workflow resumes checkpoints.
-          - { source: microsoft-msrc-csaf, max_attempts: 50 }
-          - { source: cisco-psirt-csaf, max_attempts: 4 }
-          - { source: palo-alto-psirt-csaf, max_attempts: 4 }
-          - { source: mozilla-mfsa-yaml, max_attempts: 4 }
+          - { source: microsoft-msrc-csaf, max_attempts: 50, batch_size: 12 }
+          # Cisco CSAF documents are large enough that 12 sequential fetches
+          # can exceed the Workers Free execution envelope. Keep headroom.
+          - { source: cisco-psirt-csaf, max_attempts: 4, batch_size: 2 }
+          - { source: palo-alto-psirt-csaf, max_attempts: 4, batch_size: 12 }
+          - { source: mozilla-mfsa-yaml, max_attempts: 4, batch_size: 12 }
     name: Daily source — ${{ matrix.source }}
     steps:
       - name: Run isolated source delta
@@ -69,14 +71,16 @@ jobs:
           INGEST_SECRET: ${{ secrets.INGEST_SECRET }}
           SOURCE_ID: ${{ matrix.source }}
           MAX_ATTEMPTS: ${{ matrix.max_attempts }}
+          BATCH_SIZE: ${{ matrix.batch_size }}
         run: |
           test -n "$API_ORIGIN" && test -n "$INGEST_SECRET"
           checkpoint="daily:${SOURCE_ID}:$(date -u +%Y-%m-%d)"
           for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
-            response="$(jq -n --arg source "$SOURCE_ID" --arg checkpoint "$checkpoint" '{sources:[$source],mode:"delta",checkpointId:$checkpoint}' |
+            response="$(jq -n --arg source "$SOURCE_ID" --arg checkpoint "$checkpoint" --argjson batchSize "$BATCH_SIZE" '{sources:[$source],mode:"delta",checkpointId:$checkpoint,maxItems:$batchSize}' |
               curl --fail-with-body --silent --show-error -X POST -H "Authorization: Bearer $INGEST_SECRET" -H "content-type: application/json" --data-binary @- "$API_ORIGIN/api/internal/ingest")"
             echo "$response" | jq .
-            if [ "$(echo "$response" | jq -r '.results[0].status')" = "failed" ]; then exit 1; fi
+            result_status="$(echo "$response" | jq -r '.results[0].status')"
+            if [ "$result_status" = "failed" ] || [ "$result_status" = "skipped" ]; then exit 1; fi
             state="$(echo "$response" | jq -r '.results[0].checkpoint.status // "complete"')"
             if [ "$state" = "complete" ]; then exit 0; fi
           done
@@ -134,15 +138,17 @@ jobs:
           test "$MAX_ATTEMPTS" -ge 1 && test "$MAX_ATTEMPTS" -le 50
           checkpoint="$CHECKPOINT_ID"
           if [ -z "$checkpoint" ] && [ "$MODE" = "backfill" ]; then checkpoint="backfill:${SOURCE_ID}:six-month"; fi
+          if [ "$SOURCE_ID" = "cisco-psirt-csaf" ]; then batch_size=2; else batch_size=12; fi
           for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
-            response="$(jq -n --arg source "$SOURCE_ID" --arg mode "$MODE" --arg since "$SINCE" --arg until "$UNTIL" --arg checkpoint "$checkpoint" '
-              {sources:[$source],mode:$mode,maxItems:12}
+            response="$(jq -n --arg source "$SOURCE_ID" --arg mode "$MODE" --arg since "$SINCE" --arg until "$UNTIL" --arg checkpoint "$checkpoint" --argjson batchSize "$batch_size" '
+              {sources:[$source],mode:$mode,maxItems:$batchSize}
               + (if $since == "" then {} else {since:$since} end)
               + (if $until == "" then {} else {until:$until} end)
               + (if $checkpoint == "" then {} else {checkpointId:$checkpoint} end)
             ' | curl --fail-with-body --silent --show-error -X POST -H "Authorization: Bearer $INGEST_SECRET" -H "content-type: application/json" --data-binary @- "$API_ORIGIN/api/internal/ingest")"
             echo "$response" | jq .
-            if [ "$(echo "$response" | jq -r '.results[0].status')" = "failed" ]; then exit 1; fi
+            result_status="$(echo "$response" | jq -r '.results[0].status')"
+            if [ "$result_status" = "failed" ] || [ "$result_status" = "skipped" ]; then exit 1; fi
             state="$(echo "$response" | jq -r '.results[0].checkpoint.status // "complete"')"
             if [ "$state" = "complete" ]; then exit 0; fi
           done
