@@ -58,9 +58,9 @@ jobs:
           # recently modified documents. Each attempt remains capped at 12
           # advisory fetches for Workers Free; the workflow resumes checkpoints.
           - { source: microsoft-msrc-csaf, max_attempts: 50, batch_size: 12 }
-          # Cisco CSAF documents are large enough that 12 sequential fetches
-          # can exceed the Workers Free execution envelope. Keep headroom.
-          - { source: cisco-psirt-csaf, max_attempts: 4, batch_size: 2 }
+          # Cisco CSAF documents can individually contain tens of thousands of
+          # relational assertions. Give each document its own Free invocation.
+          - { source: cisco-psirt-csaf, max_attempts: 4, batch_size: 1 }
           - { source: palo-alto-psirt-csaf, max_attempts: 4, batch_size: 12 }
           - { source: mozilla-mfsa-yaml, max_attempts: 4, batch_size: 12 }
     name: Daily source — ${{ matrix.source }}
@@ -138,7 +138,7 @@ jobs:
           test "$MAX_ATTEMPTS" -ge 1 && test "$MAX_ATTEMPTS" -le 50
           checkpoint="$CHECKPOINT_ID"
           if [ -z "$checkpoint" ] && [ "$MODE" = "backfill" ]; then checkpoint="backfill:${SOURCE_ID}:six-month"; fi
-          if [ "$SOURCE_ID" = "cisco-psirt-csaf" ]; then batch_size=2; else batch_size=12; fi
+          if [ "$SOURCE_ID" = "cisco-psirt-csaf" ]; then batch_size=1; else batch_size=12; fi
           for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
             response="$(jq -n --arg source "$SOURCE_ID" --arg mode "$MODE" --arg since "$SINCE" --arg until "$UNTIL" --arg checkpoint "$checkpoint" --argjson batchSize "$batch_size" '
               {sources:[$source],mode:$mode,maxItems:$batchSize}
