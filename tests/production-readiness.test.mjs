@@ -167,6 +167,15 @@ test("D1 health uses supported Worker SQL and deployment-owned size discovery", 
   assert.match(health, /estimatedBytes:\s*null/);
 });
 
+test("large advisory components use atomic JSON-backed D1 bulk inserts", async () => {
+  const repository = await readFile(new URL("../lib/ingestion/d1-repository.ts", import.meta.url), "utf8");
+  assert.match(repository, /FROM json_each\(\?\)/);
+  assert.match(repository, /JSON\.stringify\(affectedRecords\)/);
+  assert.match(repository, /JSON\.stringify\(remediationRecords\)/);
+  assert.match(repository, /await this\.db\.batch\(queries\)/, "bulk inserts must remain in the advisory transaction");
+  assert.doesNotMatch(repository, /queries\.push\(this\.db\.prepare\("INSERT INTO affected_products/, "affected products must not create one RPC statement per assertion");
+});
+
 test("production implementation no longer claims a 24-month scope", async () => {
   const files = ["../README.md", "../app/DashboardClient.tsx", "../lib/api/dashboard-query.ts", "../docs/github-pages-cloudflare.md"];
   for (const file of files) assert.doesNotMatch(await readFile(new URL(file, import.meta.url), "utf8"), /24[- ]month|24 months|-24 months/i, file);
