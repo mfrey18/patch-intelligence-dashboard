@@ -10,9 +10,32 @@ import {
   textStream,
 } from "./fixtures/vendor-payloads.mjs";
 
-const { normalizeMicrosoftCvrf } = await import(
+const { normalizeMicrosoftCvrf, normalizeMicrosoftReleaseNote } = await import(
   "../lib/ingestion/adapters/microsoft.ts"
 );
+
+test("Microsoft release notes preserve the authoritative reported Patch Tuesday total", () => {
+  const [advisory] = normalizeMicrosoftReleaseNote({
+    ref: { id: "release-note:2026-Aug", url: "https://api.msrc.microsoft.com/sug/v2.0/en-US/releaseNote/2026-Aug", metadata: { documentType: "release-note", releaseNumber: "2026-Aug" } },
+    contentType: "application/json",
+    body: { releaseNumber: "2026-Aug", releaseDate: "2026-08-11T10:00:00-04:00", title: "August 2026 Security Updates", description: '<h2 id="count">This release consists of 422 Microsoft CVEs:</h2>' },
+    fetchedAt: observedAt,
+    resolvedUrl: "https://api.msrc.microsoft.com/sug/v2.0/en-US/releaseNote/2026-Aug",
+  }, sanitize);
+
+  assert.equal(advisory.cves.length, 0);
+  assert.equal(advisory.releaseEvent.reportedCveCount, 422);
+  assert.equal(advisory.releaseEvent.eventDate, "2026-08-11");
+  assert.equal(advisory.releaseEvent.sourceUrl, "https://msrc.microsoft.com/update-guide/releaseNote/2026-Aug");
+  assert.equal(advisory.summary, "422 Microsoft CVEs reported for August 2026 Security Updates.");
+});
+
+test("Microsoft release notes fail closed when the authoritative count is absent", () => {
+  assert.throws(() => normalizeMicrosoftReleaseNote({
+    ref: { id: "release-note:2026-Aug", url: "https://api.msrc.microsoft.com/sug/v2.0/en-US/releaseNote/2026-Aug", metadata: { documentType: "release-note", releaseNumber: "2026-Aug" } },
+    contentType: "application/json", body: { releaseNumber: "2026-Aug", releaseDate: "2026-08-11T10:00:00-04:00", title: "August 2026 Security Updates", description: "No count present" }, fetchedAt: observedAt, resolvedUrl: "https://api.msrc.microsoft.com/sug/v2.0/en-US/releaseNote/2026-Aug",
+  }, sanitize), /authoritative Microsoft CVE count/);
+});
 const { normalizeCiscoCsaf } = await import(
   "../lib/ingestion/adapters/cisco.ts"
 );
