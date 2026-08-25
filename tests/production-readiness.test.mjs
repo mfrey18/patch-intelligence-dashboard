@@ -176,6 +176,19 @@ test("large advisory components use atomic JSON-backed D1 bulk inserts", async (
   assert.doesNotMatch(repository, /queries\.push\(this\.db\.prepare\("INSERT INTO affected_products/, "affected products must not create one RPC statement per assertion");
 });
 
+test("advisory revision history permits a material A to B to A reversion", async () => {
+  const schema = await readFile(new URL("../db/schema.ts", import.meta.url), "utf8");
+  const migration = await readFile(new URL("../migrations/0003_allow_advisory_state_reversions.sql", import.meta.url), "utf8");
+  const repository = await readFile(new URL("../lib/ingestion/d1-repository.ts", import.meta.url), "utf8");
+
+  assert.match(schema, /index\("idx_advisory_revisions_advisory_hash"\)/);
+  assert.doesNotMatch(schema, /uniqueIndex\("idx_advisory_revisions_advisory_hash"\)/);
+  assert.match(migration, /DROP INDEX IF EXISTS `idx_advisory_revisions_advisory_hash`/);
+  assert.match(migration, /CREATE INDEX `idx_advisory_revisions_advisory_hash`/);
+  assert.doesNotMatch(migration, /CREATE UNIQUE INDEX/);
+  assert.match(repository, /previous\?\.contentHash === hashes\.contentHash/, "consecutive identical source states must still be idempotent");
+});
+
 test("production implementation no longer claims a 24-month scope", async () => {
   const files = ["../README.md", "../app/DashboardClient.tsx", "../lib/api/dashboard-query.ts", "../docs/github-pages-cloudflare.md"];
   for (const file of files) assert.doesNotMatch(await readFile(new URL(file, import.meta.url), "utf8"), /24[- ]month|24 months|-24 months/i, file);
