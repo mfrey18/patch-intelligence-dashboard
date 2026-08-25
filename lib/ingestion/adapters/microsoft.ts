@@ -44,7 +44,7 @@ export function normalizeMicrosoftReleaseNote(raw: RawAdvisory, sanitize: (value
   const releaseDate = typeof body.releaseDate === "string" ? new Date(body.releaseDate) : null;
   const title = sanitize(body.title) ?? `${releaseNumber ?? "Microsoft"} Security Updates`;
   const description = typeof body.description === "string" ? body.description : "";
-  const countMatch = /This release consists of\s+([0-9,]+)\s+Microsoft CVEs/i.exec(description);
+  const countMatch = /This release consists of\s+(?:the following\s+)?([0-9,]+)\s+Microsoft CVEs/i.exec(description);
   const reportedCveCount = countMatch ? Number(countMatch[1].replaceAll(",", "")) : Number.NaN;
   if (!releaseNumber || !/^\d{4}-[A-Z][a-z]{2}$/.test(releaseNumber)) throw new Error("Microsoft release note is missing a valid release number");
   if (!releaseDate || Number.isNaN(releaseDate.getTime())) throw new Error(`Microsoft release note ${releaseNumber} is missing a valid release date`);

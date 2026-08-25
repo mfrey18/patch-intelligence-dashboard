@@ -30,6 +30,19 @@ test("Microsoft release notes preserve the authoritative reported Patch Tuesday 
   assert.equal(advisory.summary, "422 Microsoft CVEs reported for August 2026 Security Updates.");
 });
 
+test("Microsoft release notes accept the authoritative historical 'the following' heading", () => {
+  const [advisory] = normalizeMicrosoftReleaseNote({
+    ref: { id: "release-note:2026-Mar", url: "https://api.msrc.microsoft.com/sug/v2.0/en-US/releaseNote/2026-Mar", metadata: { documentType: "release-note", releaseNumber: "2026-Mar" } },
+    contentType: "application/json",
+    body: { releaseNumber: "2026-Mar", releaseDate: "2026-03-10T10:00:00-04:00", title: "March 2026 Security Updates", description: '<h2 id="count">This release consists of the following 97 Microsoft CVEs:</h2>' },
+    fetchedAt: observedAt,
+    resolvedUrl: "https://api.msrc.microsoft.com/sug/v2.0/en-US/releaseNote/2026-Mar",
+  }, sanitize);
+
+  assert.equal(advisory.releaseEvent.reportedCveCount, 97);
+  assert.equal(advisory.releaseEvent.eventDate, "2026-03-10");
+});
+
 test("Microsoft release notes fail closed when the authoritative count is absent", () => {
   assert.throws(() => normalizeMicrosoftReleaseNote({
     ref: { id: "release-note:2026-Aug", url: "https://api.msrc.microsoft.com/sug/v2.0/en-US/releaseNote/2026-Aug", metadata: { documentType: "release-note", releaseNumber: "2026-Aug" } },
