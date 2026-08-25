@@ -189,6 +189,17 @@ test("advisory revision history permits a material A to B to A reversion", async
   assert.match(repository, /previous\?\.contentHash === hashes\.contentHash/, "consecutive identical source states must still be idempotent");
 });
 
+test("Patch Tuesday totals retain Microsoft release-note provenance separately from linked CVEs", async () => {
+  const migration = await readFile(new URL("../migrations/0004_release_event_reported_totals.sql", import.meta.url), "utf8");
+  const query = await readFile(new URL("../lib/api/dashboard-query.ts", import.meta.url), "utf8");
+  const dashboard = await readFile(new URL("../app/DashboardClient.tsx", import.meta.url), "utf8");
+  assert.match(migration, /reported_cve_count/);
+  assert.match(query, /reported_cve_count == null \? linkedTotal/);
+  assert.match(query, /totalBasis: event\.reported_cve_count == null \? "linked_advisories" : "vendor_reported"/);
+  assert.match(dashboard, /Microsoft-reported CVEs/);
+  assert.match(dashboard, /linked advisory CVEs drive severity and threat metrics/);
+});
+
 test("production implementation no longer claims a 24-month scope", async () => {
   const files = ["../README.md", "../app/DashboardClient.tsx", "../lib/api/dashboard-query.ts", "../docs/github-pages-cloudflare.md"];
   for (const file of files) assert.doesNotMatch(await readFile(new URL(file, import.meta.url), "utf8"), /24[- ]month|24 months|-24 months/i, file);

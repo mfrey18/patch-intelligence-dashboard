@@ -66,6 +66,8 @@ export interface NormalizedReleaseEvent {
   eventDate: string;
   label: string;
   sourceUrl?: string;
+  reportedCveCount?: number;
+  reportedAt?: string;
 }
 
 export interface NormalizedAdvisory {

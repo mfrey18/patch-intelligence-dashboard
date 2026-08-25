@@ -28,7 +28,7 @@ export interface DashboardResponse {
   recentChanges: Array<{ cveId: string | null; advisoryId: string | null; changeType: string; summary: string; observedAt: string }>;
   nextCursor: string | null;
   sourceHealth: SourceHealth[];
-  latestReleaseEvent: { id: string; label: string; eventDate: string; total: number; critical: number; high: number; knownExploited: number; zeroDay: number; kev: number; productFamilies: Array<{ label: string; value: number }>; comparison: { label: string; eventDate: string; totalDelta: number; criticalDelta: number; highDelta: number; knownExploitedDelta: number; zeroDayDelta: number; kevDelta: number } | null } | null;
+  latestReleaseEvent: { id: string; label: string; eventDate: string; total: number; linkedTotal: number; totalBasis: "vendor_reported" | "linked_advisories"; totalSourceUrl: string | null; reportedAt: string | null; critical: number; high: number; knownExploited: number; zeroDay: number; kev: number; productFamilies: Array<{ label: string; value: number }>; comparison: { label: string; eventDate: string; totalDelta: number; linkedTotal: number; criticalDelta: number; highDelta: number; knownExploitedDelta: number; zeroDayDelta: number; kevDelta: number } | null } | null;
   demo?: boolean;
 }
 
