@@ -75,6 +75,7 @@ jobs:
           for attempt in $(seq 1 12); do
             projection_status="$(curl --silent --show-error --output "$projection_file" --write-out '%{http_code}' -X POST -H "Authorization: Bearer $INGEST_SECRET" "$PUBLIC_API_BASE_URL/api/internal/projection")"
             if [ "$projection_status" = "200" ]; then break; fi
+            if [ "$projection_status" = "503" ] && jq -e '.detail == "Dashboard projection refresh is already running"' "$projection_file" > /dev/null; then sleep 5; continue; fi
             if [ "$projection_status" != "404" ]; then cat "$projection_file"; exit 1; fi
             sleep 5
           done

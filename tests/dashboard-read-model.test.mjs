@@ -64,5 +64,6 @@ test("deployment populates the projection after Worker deploy and before smoke t
   assert.ok(deploy >= 0 && populate > deploy && smoke > populate);
   assert.match(workflow, /api\/internal\/projection/);
   assert.match(workflow, /projection_status.*404/s, "projection publication must tolerate bounded Worker propagation delay");
+  assert.match(workflow, /projection_status.*503[\s\S]*Dashboard projection refresh is already running/, "projection publication must retry bounded lease contention");
   assert.match(workflow, /\.parity\.status == "passed"/, "deployment must fail closed unless canonical projection parity passes");
 });
