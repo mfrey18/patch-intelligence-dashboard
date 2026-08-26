@@ -205,6 +205,7 @@ test("operations monitoring captures D1 capacity before enforcing the health gat
 test("retired deployment checkpoints are closed without touching operational backfill", async () => {
   const migration = await readFile(new URL("../migrations/0008_close_deployment_ingestion_checkpoints.sql", import.meta.url), "utf8");
   assert.match(migration, /status = 'pending'/);
+  assert.match(migration, /continuation_token = NULL/);
   assert.match(migration, /gate1:microsoft:%/);
   assert.match(migration, /deploy:release-note:%/);
   assert.doesNotMatch(migration, /DELETE FROM ingestion_checkpoints/i);

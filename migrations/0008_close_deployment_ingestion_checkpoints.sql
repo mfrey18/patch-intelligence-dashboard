@@ -4,7 +4,7 @@
 -- checkpoints owned by the retired deployment conventions.
 UPDATE ingestion_checkpoints
 SET status = 'complete',
-    continuation = NULL,
+    continuation_token = NULL,
     updated_at = CURRENT_TIMESTAMP
 WHERE status = 'pending'
   AND (
