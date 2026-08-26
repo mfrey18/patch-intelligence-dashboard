@@ -57,4 +57,5 @@ test("deployment populates the projection after Worker deploy and before smoke t
   const smoke = workflow.indexOf("Smoke-test Worker and public API");
   assert.ok(deploy >= 0 && populate > deploy && smoke > populate);
   assert.match(workflow, /api\/internal\/projection/);
+  assert.match(workflow, /projection_status.*404/s, "projection publication must tolerate bounded Worker propagation delay");
 });
