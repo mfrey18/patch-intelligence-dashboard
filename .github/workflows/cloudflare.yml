@@ -66,15 +66,6 @@ jobs:
             INGEST_SECRET
         env:
           INGEST_SECRET: ${{ secrets.INGEST_SECRET }}
-      - name: Refresh latest Microsoft release-note assertions
-        env:
-          INGEST_SECRET: ${{ secrets.INGEST_SECRET }}
-        run: |
-          event_date="$(curl --fail --silent --show-error "$PUBLIC_API_BASE_URL/api/dashboard/analytics/patch-tuesday" | jq -er '.releaseEvents[0].eventDate')"
-          response="$(jq -n --arg since "${event_date}T00:00:00.000Z" --arg until "${event_date}T23:59:59.999Z" --arg checkpoint "deploy:release-note:${event_date}:${GITHUB_SHA}" '{sources:["microsoft-msrc-csaf"],mode:"replay",since:$since,until:$until,checkpointId:$checkpoint,maxItems:1,refreshProjection:false}' |
-            curl --fail-with-body --silent --show-error -X POST -H "Authorization: Bearer $INGEST_SECRET" -H 'content-type: application/json' --data-binary @- "$PUBLIC_API_BASE_URL/api/internal/ingest")"
-          echo "$response" | jq .
-          echo "$response" | jq -e '.results[0].sourceId == "microsoft-msrc-csaf" and .results[0].counts.failed == 0 and .results[0].processed == 1'
       - name: Populate dashboard read model
         env:
           INGEST_SECRET: ${{ secrets.INGEST_SECRET }}
@@ -117,14 +108,6 @@ jobs:
         run: |
           status="$(curl --silent --output /dev/null --write-out '%{http_code}' -X POST -H 'content-type: application/json' --data '{"sources":["cisa-kev"]}' "$PUBLIC_API_BASE_URL/api/internal/ingest")"
           test "$status" = "401"
-      - name: Validate one bounded Microsoft delta batch
-        env:
-          INGEST_SECRET: ${{ secrets.INGEST_SECRET }}
-        run: |
-          response="$(jq -n --arg checkpoint "gate1:microsoft:${GITHUB_SHA}" '{sources:["microsoft-msrc-csaf"],mode:"delta",checkpointId:$checkpoint,maxItems:12}' |
-            curl --fail-with-body --silent --show-error -X POST -H "Authorization: Bearer $INGEST_SECRET" -H 'content-type: application/json' --data-binary @- "$PUBLIC_API_BASE_URL/api/internal/ingest")"
-          echo "$response" | jq .
-          echo "$response" | jq -e '.status != "failed" and .results[0].sourceId == "microsoft-msrc-csaf" and (.results[0].processed // 0) <= 12 and (.results[0].counts.failed // 0) == 0 and (.results[0].checkpoint.status == "pending" or .results[0].checkpoint.status == "complete")'
       - name: Capture post-deploy D1 health and latency baseline
         env:
           INGEST_SECRET: ${{ secrets.INGEST_SECRET }}

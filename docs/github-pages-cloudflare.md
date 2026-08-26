@@ -32,6 +32,8 @@ Create or review the `production-worker` GitHub Actions environment. Scope Worke
 
 The Worker workflow owns production ordering: validation, resource checks, migration-state inspection, migration application, Worker deployment, and Worker smoke tests. A successful run on `main` triggers the Pages build/deployment, followed by the browser-to-Worker-to-D1 acceptance checks in the production runbook. If the final Worker URL is not known initially, deploy the Worker, set `PUBLIC_API_BASE_URL`, and manually rerun Pages only after the Worker smoke test succeeds.
 
+Deployment does not run vendor ingestion or create ingestion checkpoints. Source deltas, Patch Tuesday reconciliation, replay, and backfill run through `.github/workflows/ingestion.yml`, where their leases and resumable checkpoints remain operationally isolated from schema and application releases.
+
 Keep Cloudflare's direct Git build/deploy integration disconnected for the production Worker. GitHub Actions is the single deployment owner; enabling Cloudflare push-triggered deploys would bypass migration ordering and the shared `production-deployment` concurrency gate.
 
 ## Optional vendor credentials
@@ -51,6 +53,7 @@ Run the Worker with `pnpm dev`. In another terminal, run `pnpm run pages:dev`. T
 - Schedule bounded `replay` intervals for consistency and revision/idempotency checks.
 - Drive `backfill` by repeatedly invoking the same checkpoint until it reports `complete`. Never attempt the six-month range in one Worker request.
 - Run authenticated retention after a successful daily cycle and alert on stale sources, repeated failures, abnormal counts, expired/stuck leases, or repeated `boundHit` results.
+- Run `.github/workflows/operations-monitor.yml` daily. It captures runtime health and D1 size before publishing or resolving the production alert, then enforces projection parity, the one-second core-latency objective, and the 400 MB D1 warning threshold.
 
 `.github/workflows/ingestion.yml` encodes this cadence but keeps schedules disabled until `ENABLE_SCHEDULED_INGESTION=true`. Its matrix uses `fail-fast: false`, so one failed source does not cancel healthy source jobs. Replay and backfill remain manual bounded invocations.
 

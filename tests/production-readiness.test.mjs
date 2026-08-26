@@ -191,6 +191,17 @@ test("advisory revision history permits a material A to B to A reversion", async
   assert.match(repository, /previous\?\.contentHash === hashes\.contentHash/, "consecutive identical source states must still be idempotent");
 });
 
+test("operations monitoring captures D1 capacity before enforcing the health gate", async () => {
+  const workflow = await readFile(new URL("../.github/workflows/operations-monitor.yml", import.meta.url), "utf8");
+  const capture = workflow.indexOf("Capture authenticated operational health");
+  const capacity = workflow.indexOf("Capture D1 capacity");
+  const publish = workflow.indexOf("Publish or resolve production alert");
+  const enforce = workflow.indexOf("Enforce production health gate");
+  assert.ok(capture >= 0 && capacity > capture && publish > capacity && enforce > publish);
+  assert.match(workflow, /databaseWarningBytes:400000000/);
+  assert.match(workflow, /dashboardCoreLatencyMs < 1000 and \.databaseBytes < \.databaseWarningBytes/);
+});
+
 test("a newly named deterministic replay reopens the canonical completed range", async () => {
   const stored = { id: "prior-replay", source_id: "microsoft-msrc-csaf", mode: "replay", coverage_start: "2026-08-11T00:00:00.000Z", coverage_end: "2026-08-11T23:59:59.999Z", window_start: "2026-08-11T00:00:00.000Z", window_end: "2026-08-11T23:59:59.999Z", continuation_token: null, status: "complete" };
   const writes = [];
@@ -249,7 +260,7 @@ test("Patch Tuesday membership excludes Microsoft VEX records and preserves rele
   assert.match(migration, /vendor_advisory_id` LIKE 'release-note:%'/);
   assert.match(migration, /UPDATE `sources`[\s\S]*'mozilla-mfsa-yaml'[\s\S]*THEN 1 ELSE 0 END/);
   const deployment = await readFile(new URL("../.github/workflows/cloudflare.yml", import.meta.url), "utf8");
-  assert.match(deployment, /Refresh latest Microsoft release-note assertions/);
+  assert.doesNotMatch(deployment, /Refresh latest Microsoft release-note assertions|Validate one bounded Microsoft delta batch|checkpointId/, "production deployment must not create partial ingestion checkpoints");
   assert.match(deployment, /reconciliationStatus != "overlinked"/);
   assert.match(deployment, /productFamilyBasis == "vendor_reported"/);
 });
