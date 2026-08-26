@@ -15,6 +15,7 @@ import { constantTimeEqual } from "../lib/ingestion/safety";
 import { addPublicCorsHeaders, publicCorsPreflight } from "../lib/api/cors";
 import { captureD1ProductionBaseline, pruneRollingRetention } from "../lib/operations/d1-health";
 import { refreshDashboardProjection } from "../lib/operations/dashboard-projection";
+import { captureOperationalMonitor } from "../lib/operations/operational-monitor";
 
 interface Env extends AdapterEnvironment {
   ASSETS: Fetcher;
@@ -66,6 +67,7 @@ const worker = {
     if (url.pathname === "/api/internal/health" && request.method === "GET") return handleInternalHealth(request, env);
     if (url.pathname === "/api/internal/retention" && request.method === "POST") return handleRetention(request, env);
     if (url.pathname === "/api/internal/projection" && request.method === "POST") return handleProjection(request, env);
+    if (url.pathname === "/api/internal/monitor" && request.method === "GET") return handleMonitor(request, env);
 
     if (url.pathname === "/_vinext/image") {
       const allowedWidths = [...DEFAULT_DEVICE_SIZES, ...DEFAULT_IMAGE_SIZES];
@@ -189,6 +191,13 @@ async function handleProjection(request: Request, env: Env): Promise<Response> {
   if (authError) return authError;
   try { return privateJson(await refreshDashboardProjection(env.DB)); }
   catch (error) { return privateJson({ error: "Dashboard projection refresh failed", detail: safeError(error), lastKnownGoodPreserved: true }, 503); }
+}
+
+async function handleMonitor(request: Request, env: Env): Promise<Response> {
+  const authError = authorizeInternalRequest(request, env);
+  if (authError) return authError;
+  try { return privateJson(await captureOperationalMonitor(env.DB)); }
+  catch (error) { return privateJson({ error: "Operational monitor failed", detail: safeError(error) }, 503); }
 }
 
 function authorizeInternalRequest(request: Request, env: Env): Response | null {

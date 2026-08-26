@@ -101,6 +101,7 @@ The focused suites cover normalized adapter fixtures, hashing and revision diffs
 - `GET /api/internal/health` — bearer-protected D1 size, row/index inventory, EPSS growth, representative query latency, and directional capacity projections.
 - `POST /api/internal/retention` — bearer-protected rolling retention for EPSS history plus completed-checkpoint and expired-lease housekeeping; advisory/revision audit history is preserved.
 - `POST /api/internal/projection` — bearer-protected reconciliation/population of the disposable dashboard read model.
+- `GET /api/internal/monitor` — bearer-protected projection parity/freshness, source health, lease, batch-bound, and core-latency monitoring.
 
 Cross-origin access is available only for `GET /api/dashboard` and `GET /api/cves/:id`, and only to exact origins configured through `PUBLIC_DASHBOARD_ORIGINS`. The internal ingestion route never emits browser CORS headers.
 

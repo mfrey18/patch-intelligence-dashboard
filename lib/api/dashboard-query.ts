@@ -69,6 +69,21 @@ export async function queryDashboard(db: D1Database, url: URL): Promise<Dashboar
   return response;
 }
 
+export interface ProjectionParityMetrics {
+  total: number;
+  critical: number;
+  high: number;
+  knownExploited: number;
+  kev: number;
+  zeroDay: number;
+  patchAvailable: number;
+  p1: number;
+  p2: number;
+  p3: number;
+  microsoft: number;
+  cisco: number;
+}
+
 async function queryRecentChanges(db: D1Database, cte: string, bindings: unknown[]): Promise<DashboardResponse["recentChanges"]> {
   const result = await db.prepare(`${cte} SELECT ic.cve_id, ic.advisory_id, ic.change_type, ic.summary, ic.observed_at FROM intelligence_changes ic JOIN filtered f ON f.cve_id=ic.cve_id ORDER BY ic.observed_at DESC LIMIT 8`).bind(...bindings).all<Record<string, unknown>>();
   return (result.results ?? []).map((row) => ({ cveId: nullableString(row.cve_id), advisoryId: nullableString(row.advisory_id), changeType: String(row.change_type), summary: String(row.summary), observedAt: String(row.observed_at) }));
@@ -94,6 +109,25 @@ async function hasPublishedProjection(db: D1Database): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+export async function queryCanonicalProjectionParity(db: D1Database): Promise<ProjectionParityMetrics> {
+  const { cte, bindings } = buildCanonicalFilteredCte(new URLSearchParams());
+  const row = await db.prepare(`${cte} SELECT COUNT(*) total,
+    COALESCE(SUM(severity_rank=4),0) critical,COALESCE(SUM(severity_rank=3),0) high,
+    COALESCE(SUM(known_exploited),0) known_exploited,COALESCE(SUM(kev),0) kev,
+    COALESCE(SUM(zero_day),0) zero_day,COALESCE(SUM(patch_available=1),0) patch_available,
+    COALESCE(SUM(kev=1 OR known_exploited=1),0) p1,
+    COALESCE(SUM(kev=0 AND known_exploited=0 AND ((severity_rank=4 AND epss_percentile>=?) OR (severity_rank=3 AND epss_percentile>=?))),0) p2,
+    COALESCE(SUM(instr(lower(vendor),'microsoft')>0),0) microsoft,
+    COALESCE(SUM(instr(lower(vendor),'cisco')>0),0) cisco
+    FROM filtered`).bind(...bindings, PRIORITY_THRESHOLDS.criticalHighEpssPercentile, PRIORITY_THRESHOLDS.highVeryHighEpssPercentile).first<Record<string, number>>();
+  return parityMetrics(row);
+}
+
+function parityMetrics(row: Record<string, number> | null): ProjectionParityMetrics {
+  const total = Number(row?.total ?? 0); const p1 = Number(row?.p1 ?? 0); const p2 = Number(row?.p2 ?? 0);
+  return { total, critical: Number(row?.critical ?? 0), high: Number(row?.high ?? 0), knownExploited: Number(row?.known_exploited ?? 0), kev: Number(row?.kev ?? 0), zeroDay: Number(row?.zero_day ?? 0), patchAvailable: Number(row?.patch_available ?? 0), p1, p2, p3: Math.max(0, total - p1 - p2), microsoft: Number(row?.microsoft ?? 0), cisco: Number(row?.cisco ?? 0) };
 }
 
 async function queryEpssMovers(db: D1Database, cte: string, bindings: unknown[]): Promise<DashboardResponse["epssMovers"]> {

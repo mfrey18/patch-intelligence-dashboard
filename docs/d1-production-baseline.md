@@ -57,6 +57,8 @@ Migration `0005_dashboard_read_model.sql` adds a disposable `cve_dashboard_facts
 
 Normal dashboard filters, summaries, activity, priority, CWE, and rows read the small projection rather than repeatedly rebuilding the product/remediation/exploitation graph. `include=core` skips optional analytical panels for fast first paint; the static client then requests the full analytical response. Public dashboard responses use a bounded 60-second Workers Cache API entry keyed by the full URL, with CORS added after cache lookup so cached content cannot leak an origin-specific header. Structured `dashboard_query` logs identify projection versus fallback, core versus full, and end-to-end duration. The authenticated health capture measures both `dashboard_api_core` and complete `dashboard_api_default` composition.
 
+Migration `0006_projection_parity_monitoring.sql` adds a disposable staging table, a projection lease, and projection-attempt/parity audit fields. Projection refresh now compares canonical and staged totals for overall CVEs, Critical, High, known exploitation, KEV, zero-day, patch availability, P1/P2/P3, Microsoft, and Cisco before atomically replacing the current facts. Any mismatch preserves the last-known-good projection and records the failed attempt for the operational monitor.
+
 Directional capacity estimates use the observed 1,699 EPSS rows/day, a 183-day retained window, the current whole-database average of 468.86 bytes/row, and a startup allowance of 60 audit/run rows/day until at least seven representative production days exist:
 
 | Horizon | Estimated rows | Estimated bytes |

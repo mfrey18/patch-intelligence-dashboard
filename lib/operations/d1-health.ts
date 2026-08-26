@@ -2,7 +2,7 @@ import { INTELLIGENCE_WINDOW_MONTHS, rollingWindowStart } from "../ingestion/ope
 import { queryDashboard } from "../api/dashboard-query";
 
 const MAJOR_TABLES = [
-  "advisories", "advisory_revisions", "cves", "advisory_cves", "affected_products", "remediations", "exploit_evidence", "kev_entries", "epss_datasets", "epss_observations", "intelligence_changes", "source_runs", "source_run_results", "ingestion_checkpoints", "ingestion_leases", "cve_dashboard_facts", "dashboard_projection_state",
+  "advisories", "advisory_revisions", "cves", "advisory_cves", "affected_products", "remediations", "exploit_evidence", "kev_entries", "epss_datasets", "epss_observations", "intelligence_changes", "source_runs", "source_run_results", "ingestion_checkpoints", "ingestion_leases", "cve_dashboard_facts", "cve_dashboard_facts_staging", "dashboard_projection_state", "dashboard_projection_leases",
 ] as const;
 const STARTUP_AUDIT_ROWS_PER_DAY_ESTIMATE = 60;
 

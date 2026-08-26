@@ -27,3 +27,6 @@ export const SOURCE_CATALOG = [
 ] as const satisfies readonly SourceCatalogEntry[];
 
 export const SOURCE_IDS = new Set<string>(SOURCE_CATALOG.map((source) => source.id));
+
+/** Sources intentionally included in the production daily cadence. */
+export const PRODUCTION_SOURCE_IDS = ["cisa-kev", "first-epss", "microsoft-msrc-csaf", "cisco-psirt-csaf", "palo-alto-psirt-csaf", "mozilla-mfsa-yaml"] as const;

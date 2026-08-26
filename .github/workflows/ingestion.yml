@@ -172,11 +172,12 @@ jobs:
           INGEST_SECRET: ${{ secrets.INGEST_SECRET }}
         run: |
           curl --fail-with-body --silent --show-error -X POST -H "Authorization: Bearer $INGEST_SECRET" "$API_ORIGIN/api/internal/retention" | jq .
-      - name: Check source freshness, failures, and stuck leases
+      - name: Check projection parity, source freshness, bounds, latency, and leases
         env:
           API_ORIGIN: ${{ vars.PUBLIC_API_BASE_URL }}
+          INGEST_SECRET: ${{ secrets.INGEST_SECRET }}
         run: |
-          dashboard="$(curl --fail --silent --show-error "$API_ORIGIN/api/dashboard?limit=1")"
-          echo "$dashboard" | jq '.sourceHealth'
-          expected='["cisa-kev","first-epss","microsoft-msrc-csaf","cisco-psirt-csaf","palo-alto-psirt-csaf","mozilla-mfsa-yaml"]'
-          echo "$dashboard" | jq -e --argjson expected "$expected" '[.sourceHealth[] | select(.sourceId as $id | $expected | index($id)) | select(.freshness != "fresh" or .result == "failed" or .lease.active == true)] | length == 0'
+          monitor="$(curl --fail-with-body --silent --show-error -H "Authorization: Bearer $INGEST_SECRET" "$API_ORIGIN/api/internal/monitor")"
+          echo "$monitor" | jq .
+          echo "$monitor" | jq -r '.alerts[] | "::warning title=\(.code)::\(.message)"'
+          echo "$monitor" | jq -e '.status != "unhealthy" and .projection.parityStatus == "passed" and .projection.actualCount > 0 and (.sources | length) == 6'

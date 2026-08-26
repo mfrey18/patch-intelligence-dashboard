@@ -1,0 +1,58 @@
+name: Production operations monitor
+
+on:
+  schedule:
+    - cron: "15 10 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-operations-monitor
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    environment:
+      name: production-ingestion
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      API_ORIGIN: ${{ vars.PUBLIC_API_BASE_URL }}
+      CLOUDFLARE_D1_DATABASE_NAME: ${{ vars.CLOUDFLARE_D1_DATABASE_NAME }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Capture authenticated operational health
+        env:
+          INGEST_SECRET: ${{ secrets.INGEST_SECRET }}
+        run: |
+          test -n "$API_ORIGIN" && test -n "$INGEST_SECRET" && test -n "$CLOUDFLARE_D1_DATABASE_NAME"
+          curl --fail-with-body --silent --show-error -H "Authorization: Bearer $INGEST_SECRET" "$API_ORIGIN/api/internal/monitor" > operations-monitor.json
+          jq . operations-monitor.json
+          jq -r '.alerts[] | "::warning title=\(.code)::\(.message)"' operations-monitor.json
+          jq -e '.status != "unhealthy" and .projection.parityStatus == "passed" and .projection.actualCount > 0 and .dashboardCoreLatencyMs < 1000' operations-monitor.json
+      - name: Enforce D1 capacity threshold
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          d1_info="$(pnpm exec wrangler d1 info "$CLOUDFLARE_D1_DATABASE_NAME" --json)"
+          database_bytes="$(echo "$d1_info" | jq -er '.database_size | tonumber | select(. > 0)')"
+          jq --argjson databaseBytes "$database_bytes" '. + {databaseBytes:$databaseBytes,databaseWarningBytes:400000000}' operations-monitor.json > operations-monitor-with-capacity.json
+          test "$database_bytes" -lt 400000000
+      - name: Archive operational health
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-operations-${{ github.run_id }}
+          path: operations-monitor*.json
+          retention-days: 30
