@@ -202,6 +202,15 @@ test("operations monitoring captures D1 capacity before enforcing the health gat
   assert.match(workflow, /dashboardCoreLatencyMs < 1000 and \.databaseBytes < \.databaseWarningBytes/);
 });
 
+test("retired deployment checkpoints are closed without touching operational backfill", async () => {
+  const migration = await readFile(new URL("../migrations/0008_close_deployment_ingestion_checkpoints.sql", import.meta.url), "utf8");
+  assert.match(migration, /status = 'pending'/);
+  assert.match(migration, /gate1:microsoft:%/);
+  assert.match(migration, /deploy:release-note:%/);
+  assert.doesNotMatch(migration, /DELETE FROM ingestion_checkpoints/i);
+  assert.doesNotMatch(migration, /backfill:/i);
+});
+
 test("a newly named deterministic replay reopens the canonical completed range", async () => {
   const stored = { id: "prior-replay", source_id: "microsoft-msrc-csaf", mode: "replay", coverage_start: "2026-08-11T00:00:00.000Z", coverage_end: "2026-08-11T23:59:59.999Z", window_start: "2026-08-11T00:00:00.000Z", window_end: "2026-08-11T23:59:59.999Z", continuation_token: null, status: "complete" };
   const writes = [];

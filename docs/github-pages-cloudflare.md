@@ -34,6 +34,8 @@ The Worker workflow owns production ordering: validation, resource checks, migra
 
 Deployment does not run vendor ingestion or create ingestion checkpoints. Source deltas, Patch Tuesday reconciliation, replay, and backfill run through `.github/workflows/ingestion.yml`, where their leases and resumable checkpoints remain operationally isolated from schema and application releases.
 
+Migration `0008_close_deployment_ingestion_checkpoints.sql` preserves and closes pending checkpoints created by the retired `gate1:microsoft:*` and `deploy:release-note:*` deployment checks. It does not alter operational delta, replay, or backfill checkpoints.
+
 Keep Cloudflare's direct Git build/deploy integration disconnected for the production Worker. GitHub Actions is the single deployment owner; enabling Cloudflare push-triggered deploys would bypass migration ordering and the shared `production-deployment` concurrency gate.
 
 ## Optional vendor credentials
