@@ -191,6 +191,28 @@ test("advisory revision history permits a material A to B to A reversion", async
   assert.match(repository, /previous\?\.contentHash === hashes\.contentHash/, "consecutive identical source states must still be idempotent");
 });
 
+test("a newly named deterministic replay reopens the canonical completed range", async () => {
+  const stored = { id: "prior-replay", source_id: "microsoft-msrc-csaf", mode: "replay", coverage_start: "2026-08-11T00:00:00.000Z", coverage_end: "2026-08-11T23:59:59.999Z", window_start: "2026-08-11T00:00:00.000Z", window_end: "2026-08-11T23:59:59.999Z", continuation_token: null, status: "complete" };
+  const writes = [];
+  const db = {
+    prepare(sql) {
+      return { bind(...values) { return {
+        async first() {
+          if (/WHERE id=\?/.test(sql)) return values[0] === stored.id ? stored : null;
+          if (/WHERE source_id=\?/.test(sql)) return stored;
+          return null;
+        },
+        async run() { writes.push({ sql, values }); return {}; },
+      }; } };
+    },
+  };
+  const replay = await loadOrCreateCheckpoint(db, "microsoft-msrc-csaf", { checkpointId: "deploy-replay", mode: "replay", since: stored.coverage_start, until: stored.coverage_end }, new Date("2026-08-26T12:00:00Z"));
+  assert.equal(replay.id, "prior-replay");
+  assert.equal(replay.status, "pending");
+  assert.match(writes[0].sql, /ON CONFLICT DO NOTHING/);
+  assert.match(writes.at(-1).sql, /status='pending'.*completed_at=NULL/);
+});
+
 test("CVE detail exposes component-level advisory revision comparison with provenance", async () => {
   const query = await readFile(new URL("../lib/api/cve-query.ts", import.meta.url), "utf8");
   const detail = await readFile(new URL("../app/cve/[id]/CveDetailClient.tsx", import.meta.url), "utf8");

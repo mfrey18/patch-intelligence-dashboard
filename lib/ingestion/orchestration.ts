@@ -54,10 +54,23 @@ export async function loadOrCreateCheckpoint(db: D1Database, sourceId: string, r
   }
   const planned = normalizeIngestionRequest(sourceId, request, now);
   const timestamp = now.toISOString();
-  await db.prepare("INSERT INTO ingestion_checkpoints (id, source_id, mode, coverage_start, coverage_end, window_start, window_end, continuation_token, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 'pending', ?, ?) ON CONFLICT(id) DO NOTHING").bind(planned.id, sourceId, planned.mode, planned.coverageStart, planned.coverageEnd, planned.windowStart, planned.windowEnd, timestamp, timestamp).run();
-  const row = await db.prepare("SELECT id, source_id, mode, coverage_start, coverage_end, window_start, window_end, continuation_token, status FROM ingestion_checkpoints WHERE id=?").bind(planned.id).first<Record<string, unknown>>();
+  await db.prepare("INSERT INTO ingestion_checkpoints (id, source_id, mode, coverage_start, coverage_end, window_start, window_end, continuation_token, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 'pending', ?, ?) ON CONFLICT DO NOTHING").bind(planned.id, sourceId, planned.mode, planned.coverageStart, planned.coverageEnd, planned.windowStart, planned.windowEnd, timestamp, timestamp).run();
+  let row = await db.prepare("SELECT id, source_id, mode, coverage_start, coverage_end, window_start, window_end, continuation_token, status FROM ingestion_checkpoints WHERE id=?").bind(planned.id).first<Record<string, unknown>>();
+  let matchedCanonicalRange = false;
+  if (!row) {
+    row = await db.prepare("SELECT id, source_id, mode, coverage_start, coverage_end, window_start, window_end, continuation_token, status FROM ingestion_checkpoints WHERE source_id=? AND mode=? AND coverage_start=? AND coverage_end=? LIMIT 1").bind(sourceId, planned.mode, planned.coverageStart, planned.coverageEnd).first<Record<string, unknown>>();
+    matchedCanonicalRange = Boolean(row);
+  }
   if (!row) throw new Error("Ingestion checkpoint could not be created");
   if (String(row.source_id) !== sourceId || String(row.mode) !== planned.mode || String(row.coverage_start) !== planned.coverageStart || String(row.coverage_end) !== planned.coverageEnd) throw new Error("Checkpoint identity conflicts with a different ingestion range");
+  // A newly named replay of the same canonical range is an intentional
+  // consistency check, not a duplicate checkpoint. Reopen only completed
+  // replays; active or failed ranges remain resumable as-is.
+  if (matchedCanonicalRange && planned.mode === "replay" && String(row.status) === "complete") {
+    const checkpointId = String(row.id);
+    await db.prepare("UPDATE ingestion_checkpoints SET window_start=?, window_end=?, continuation_token=NULL, status='pending', last_error=NULL, completed_at=NULL, updated_at=? WHERE id=?").bind(planned.windowStart, planned.windowEnd, timestamp, checkpointId).run();
+    row = { ...row, window_start: planned.windowStart, window_end: planned.windowEnd, continuation_token: null, status: "pending" };
+  }
   return checkpointFromRow(row);
 }
 
