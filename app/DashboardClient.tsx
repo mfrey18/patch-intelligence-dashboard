@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { DashboardResponse } from "../lib/api/contracts";
 import type { DashboardVulnerabilityRow } from "../lib/domain/types";
 
@@ -11,19 +11,32 @@ export function DashboardClient({ initialData, apiBaseUrl = "", cvePathPrefix = 
   const [query, setQuery] = useState("");
   const [filters, setFilters] = useState<Record<string, string>>({});
   const [shareStatus, setShareStatus] = useState("Copy view URL");
+  const requestSequence = useRef(0);
 
   const load = useCallback(async (search = window.location.search) => {
+    const sequence = ++requestSequence.current;
     const params = new URLSearchParams(search);
     setFilters(Object.fromEntries(params.entries()));
     setQuery(params.get("q") ?? "");
     setLoading(true);
     setError(null);
     try {
-      const response = await fetch(`${apiBaseUrl}/api/dashboard${search}`, { headers: { accept: "application/json" } });
-      if (!response.ok) throw new Error(`Dashboard returned ${response.status}`);
-      setData(await response.json() as DashboardResponse);
+      const coreParams = new URLSearchParams(params);
+      coreParams.set("include", "core");
+      const coreResponse = await fetch(`${apiBaseUrl}/api/dashboard?${coreParams}`, { headers: { accept: "application/json" } });
+      if (!coreResponse.ok) throw new Error(`Dashboard returned ${coreResponse.status}`);
+      if (sequence !== requestSequence.current) return;
+      setData(await coreResponse.json() as DashboardResponse);
+      setLoading(false);
+
+      const fullParams = new URLSearchParams(params);
+      fullParams.delete("include");
+      const fullSearch = fullParams.size ? `?${fullParams}` : "";
+      const fullResponse = await fetch(`${apiBaseUrl}/api/dashboard${fullSearch}`, { headers: { accept: "application/json" } });
+      if (!fullResponse.ok) throw new Error(`Dashboard analytics returned ${fullResponse.status}`);
+      if (sequence === requestSequence.current) setData(await fullResponse.json() as DashboardResponse);
     } catch {
-      setError("Live intelligence could not be refreshed. The last available snapshot remains visible.");
+      if (sequence === requestSequence.current) setError("Live intelligence could not be refreshed. The last available snapshot remains visible.");
     } finally {
       setLoading(false);
     }

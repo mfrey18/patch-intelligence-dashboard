@@ -2,7 +2,7 @@ import { INTELLIGENCE_WINDOW_MONTHS, rollingWindowStart } from "../ingestion/ope
 import { queryDashboard } from "../api/dashboard-query";
 
 const MAJOR_TABLES = [
-  "advisories", "advisory_revisions", "cves", "advisory_cves", "affected_products", "remediations", "exploit_evidence", "kev_entries", "epss_datasets", "epss_observations", "intelligence_changes", "source_runs", "source_run_results", "ingestion_checkpoints", "ingestion_leases",
+  "advisories", "advisory_revisions", "cves", "advisory_cves", "affected_products", "remediations", "exploit_evidence", "kev_entries", "epss_datasets", "epss_observations", "intelligence_changes", "source_runs", "source_run_results", "ingestion_checkpoints", "ingestion_leases", "cve_dashboard_facts", "dashboard_projection_state",
 ] as const;
 const STARTUP_AUDIT_ROWS_PER_DAY_ESTIMATE = 60;
 
@@ -33,6 +33,7 @@ export async function captureD1ProductionBaseline(db: D1Database): Promise<D1Pro
 
   const queryLatencyMs: Record<string, number> = {};
   await timed(queryLatencyMs, "dashboard_api_default", () => queryDashboard(db, new URL("https://baseline.invalid/api/dashboard?limit=1")));
+  await timed(queryLatencyMs, "dashboard_api_core", () => queryDashboard(db, new URL("https://baseline.invalid/api/dashboard?limit=1&include=core")));
   await timed(queryLatencyMs, "dashboard_six_month_summary", () => db.prepare("SELECT COUNT(DISTINCT ac.cve_id) total FROM advisories a JOIN advisory_cves ac ON ac.advisory_id=a.id WHERE COALESCE(a.published_at,a.source_updated_at)>=date('now','-6 months')").first());
   await timed(queryLatencyMs, "dashboard_priority_signals", () => db.prepare("SELECT COUNT(DISTINCT ac.cve_id) total FROM advisory_cves ac WHERE EXISTS(SELECT 1 FROM kev_entries k WHERE k.cve_id=ac.cve_id AND k.active=1) OR EXISTS(SELECT 1 FROM exploit_evidence ee WHERE ee.cve_id=ac.cve_id AND ee.evidence_type='known_exploitation' AND ee.status='confirmed')").first());
   await timed(queryLatencyMs, "epss_current_join", () => db.prepare("SELECT COUNT(*) total FROM epss_observations eo JOIN epss_datasets ed ON ed.score_date=eo.score_date AND ed.is_current=1 JOIN cves c ON c.id=eo.cve_id").first());

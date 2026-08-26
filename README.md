@@ -95,10 +95,12 @@ The focused suites cover normalized adapter fixtures, hashing and revision diffs
 ## API
 
 - `GET /api/dashboard` — filtered vulnerability summary, intelligence changes, priority distribution, activity/threat/vendor/product/CWE analytics, EPSS movers, release-event context, coverage/freshness, and cursor-paginated rows. Filter state is URL-native.
+- `GET /api/dashboard?include=core` — core metrics, rows, changes, source health, and release-event context while optional analytics load separately.
 - `GET /api/cves/:id` — canonical CVE data, vendor assertions, affected products, remediation, exploitation evidence, KEV, EPSS current/history, timeline, and source links.
 - `POST /api/internal/ingest` — bearer-protected, idempotent, source-allowlisted ingestion with bounded request size and per-source leases.
 - `GET /api/internal/health` — bearer-protected D1 size, row/index inventory, EPSS growth, representative query latency, and directional capacity projections.
 - `POST /api/internal/retention` — bearer-protected rolling retention for EPSS history plus completed-checkpoint and expired-lease housekeeping; advisory/revision audit history is preserved.
+- `POST /api/internal/projection` — bearer-protected reconciliation/population of the disposable dashboard read model.
 
 Cross-origin access is available only for `GET /api/dashboard` and `GET /api/cves/:id`, and only to exact origins configured through `PUBLIC_DASHBOARD_ORIGINS`. The internal ingestion route never emits browser CORS headers.
 

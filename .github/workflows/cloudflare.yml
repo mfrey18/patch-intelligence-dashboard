@@ -66,6 +66,13 @@ jobs:
             INGEST_SECRET
         env:
           INGEST_SECRET: ${{ secrets.INGEST_SECRET }}
+      - name: Populate dashboard read model
+        env:
+          INGEST_SECRET: ${{ secrets.INGEST_SECRET }}
+        run: |
+          projection="$(curl --fail-with-body --silent --show-error -X POST -H "Authorization: Bearer $INGEST_SECRET" "$PUBLIC_API_BASE_URL/api/internal/projection")"
+          echo "$projection" | jq .
+          echo "$projection" | jq -e '.status == "success" and .version >= 1 and .cveCount > 0'
       - name: Smoke-test Worker and public API
         run: |
           dashboard="$(curl --fail --silent --show-error "$PUBLIC_API_BASE_URL/api/dashboard?limit=1")"

@@ -14,6 +14,7 @@ import { ingestEpssBulk } from "../lib/ingestion/enrichments/epss";
 import { constantTimeEqual } from "../lib/ingestion/safety";
 import { addPublicCorsHeaders, publicCorsPreflight } from "../lib/api/cors";
 import { captureD1ProductionBaseline, pruneRollingRetention } from "../lib/operations/d1-health";
+import { refreshDashboardProjection } from "../lib/operations/dashboard-projection";
 
 interface Env extends AdapterEnvironment {
   ASSETS: Fetcher;
@@ -50,13 +51,7 @@ const worker = {
     if (publicApiRoute && request.method === "OPTIONS") return withSecurityHeaders(publicCorsPreflight(request, env.PUBLIC_DASHBOARD_ORIGINS));
 
     if (url.pathname === "/api/dashboard" && request.method === "GET") {
-      try {
-        const dashboard = await queryDashboard(env.DB, url);
-        const hasOperationalData = dashboard.sourceHealth.some((source) => source.lastAttempt);
-        return json(dashboard.metrics.total === 0 && !hasOperationalData ? demoDashboard : dashboard, 200, request, env);
-      } catch {
-        return json({ ...demoDashboard, generatedAt: new Date().toISOString(), demo: true, warning: "The intelligence store is awaiting its first successful ingestion." }, 200, request, env);
-      }
+      return dashboardResponse(request, env, ctx);
     }
 
     if (url.pathname.startsWith("/api/cves/") && request.method === "GET") {
@@ -70,6 +65,7 @@ const worker = {
     if (url.pathname === "/api/internal/ingest" && request.method === "POST") return handleIngestion(request, env);
     if (url.pathname === "/api/internal/health" && request.method === "GET") return handleInternalHealth(request, env);
     if (url.pathname === "/api/internal/retention" && request.method === "POST") return handleRetention(request, env);
+    if (url.pathname === "/api/internal/projection" && request.method === "POST") return handleProjection(request, env);
 
     if (url.pathname === "/_vinext/image") {
       const allowedWidths = [...DEFAULT_DEVICE_SIZES, ...DEFAULT_IMAGE_SIZES];
@@ -96,13 +92,14 @@ async function handleIngestion(request: Request, env: Env): Promise<Response> {
   if (authError) return authError;
   const length = Number(request.headers.get("content-length") ?? 0);
   if (length > 16_384) return privateJson({ error: "Request body is too large" }, 413);
-  let body: IngestionRequest & { sources?: string[]; idempotencyKey?: string; maxItems?: number };
+  let body: IngestionRequest & { sources?: string[]; idempotencyKey?: string; maxItems?: number; refreshProjection?: boolean };
   try {
     const rawBody = await request.text();
     if (new TextEncoder().encode(rawBody).byteLength > 16_384) return privateJson({ error: "Request body is too large" }, 413);
     body = JSON.parse(rawBody) as typeof body;
   } catch { return privateJson({ error: "Invalid JSON body" }, 400); }
   const requested = [...new Set(body.sources ?? [])];
+  if (body.refreshProjection != null && typeof body.refreshProjection !== "boolean") return privateJson({ error: "refreshProjection must be a boolean" }, 400);
   if (requested.length !== 1) return privateJson({ error: "Exactly one source is required per ingestion invocation" }, 400);
   const [sourceId] = requested;
   if (!SOURCE_IDS.has(sourceId)) return privateJson({ error: "Request includes a source outside the ingestion allowlist" }, 400);
@@ -114,6 +111,7 @@ async function handleIngestion(request: Request, env: Env): Promise<Response> {
   const holder = crypto.randomUUID();
   if (!(await acquireLease(env.DB, sourceId, holder))) return privateJson({ completedAt: new Date().toISOString(), status: "partial", results: [{ sourceId, status: "skipped", error: "Source ingestion is already running" }] }, 207);
   let checkpoint: IngestionCheckpoint | null = null;
+  let shouldRefreshProjection = false;
   try {
     const adapter = createVendorAdapter(sourceId, env);
     if (adapter) {
@@ -128,11 +126,13 @@ async function handleIngestion(request: Request, env: Env): Promise<Response> {
       });
       const nextCheckpoint = await advanceCheckpoint(env.DB, checkpoint, result);
       results.push({ ...result, checkpoint: nextCheckpoint });
+      shouldRefreshProjection = body.refreshProjection !== false && (checkpoint.mode === "delta" || nextCheckpoint.status === "complete");
     } else {
       if (body.mode && body.mode !== "delta") throw new Error(`${sourceId} is a full-snapshot enrichment and only supports delta synchronization`);
       const key = body.idempotencyKey ?? `${sourceId}:delta:${new Date().toISOString().slice(0, 10)}`;
       if (sourceId === "cisa-kev") results.push(await ingestCisaKev(env.DB, key));
       else if (sourceId === "first-epss") results.push(await ingestEpssBulk(env.DB, key));
+      shouldRefreshProjection = body.refreshProjection !== false;
     }
   } catch (error) {
     const message = safeError(error);
@@ -142,7 +142,32 @@ async function handleIngestion(request: Request, env: Env): Promise<Response> {
     await releaseLease(env.DB, sourceId, holder);
   }
   const outcome = ingestionBatchOutcome(results);
-  return privateJson({ completedAt: new Date().toISOString(), status: outcome.status, results }, outcome.httpStatus);
+  let projection: unknown = null;
+  if (shouldRefreshProjection) {
+    try { projection = await refreshDashboardProjection(env.DB); }
+    catch (error) { projection = { status: "failed", error: safeError(error), lastKnownGoodPreserved: true }; }
+  }
+  const projectionFailed = Boolean(projection && (projection as { status?: string }).status === "failed");
+  return privateJson({ completedAt: new Date().toISOString(), status: projectionFailed ? "partial" : outcome.status, results, projection }, projectionFailed ? 207 : outcome.httpStatus);
+}
+
+async function dashboardResponse(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const cache = (globalThis as unknown as { caches?: { default?: Cache } }).caches?.default;
+  const cacheKey = new Request(request.url, { method: "GET" });
+  if (cache) {
+    const cached = await cache.match(cacheKey);
+    if (cached) return addCorsToResponse(cached, request, env);
+  }
+  try {
+    const dashboard = await queryDashboard(env.DB, new URL(request.url));
+    const hasOperationalData = dashboard.sourceHealth.some((source) => source.lastAttempt);
+    const value = dashboard.metrics.total === 0 && !hasOperationalData ? demoDashboard : dashboard;
+    const response = json(value);
+    if (cache && value !== demoDashboard) ctx.waitUntil(cache.put(cacheKey, response.clone()));
+    return addCorsToResponse(response, request, env);
+  } catch {
+    return json({ ...demoDashboard, generatedAt: new Date().toISOString(), demo: true, warning: "The intelligence store is awaiting its first successful ingestion." }, 200, request, env);
+  }
 }
 
 async function handleInternalHealth(request: Request, env: Env): Promise<Response> {
@@ -157,6 +182,13 @@ async function handleRetention(request: Request, env: Env): Promise<Response> {
   if (authError) return authError;
   try { return privateJson({ completedAt: new Date().toISOString(), ...(await pruneRollingRetention(env.DB)) }); }
   catch (error) { return privateJson({ error: "Rolling retention failed", detail: safeError(error) }, 503); }
+}
+
+async function handleProjection(request: Request, env: Env): Promise<Response> {
+  const authError = authorizeInternalRequest(request, env);
+  if (authError) return authError;
+  try { return privateJson(await refreshDashboardProjection(env.DB)); }
+  catch (error) { return privateJson({ error: "Dashboard projection refresh failed", detail: safeError(error), lastKnownGoodPreserved: true }, 503); }
 }
 
 function authorizeInternalRequest(request: Request, env: Env): Response | null {
@@ -184,6 +216,11 @@ function json(value: unknown, status = 200, request?: Request, env?: Env): Respo
   const headers = new Headers({ "content-type": "application/json; charset=utf-8", "cache-control": status === 200 ? "public, max-age=60, stale-while-revalidate=300" : "no-store" });
   if (request && env) addPublicCorsHeaders(headers, request, env.PUBLIC_DASHBOARD_ORIGINS);
   return withSecurityHeaders(new Response(JSON.stringify(value), { status, headers }));
+}
+function addCorsToResponse(response: Response, request: Request, env: Env): Response {
+  const headers = new Headers(response.headers);
+  addPublicCorsHeaders(headers, request, env.PUBLIC_DASHBOARD_ORIGINS);
+  return withSecurityHeaders(new Response(response.body, { status: response.status, statusText: response.statusText, headers }));
 }
 function privateJson(value: unknown, status = 200): Response { return withSecurityHeaders(new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" } })); }
 function validTimestamp(value: string): boolean { return value.length <= 40 && !Number.isNaN(new Date(value).getTime()) && /^\d{4}-\d{2}-\d{2}T/.test(value); }

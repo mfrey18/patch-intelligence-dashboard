@@ -9,8 +9,11 @@ interface BaseRow {
 }
 
 export async function queryDashboard(db: D1Database, url: URL): Promise<DashboardResponse> {
+  const startedAt = performance.now();
   const params = url.searchParams;
-  const { cte, bindings } = buildFilteredCte(params);
+  const projection = await hasPublishedProjection(db);
+  const { cte, bindings } = projection ? buildProjectedFilteredCte(params) : buildCanonicalFilteredCte(params);
+  const coreOnly = params.get("include") === "core";
   const limit = clamp(Number(params.get("limit") ?? 50), 1, 100);
   const offset = decodeCursor(params.get("cursor"));
   const sort = sortSql(params.get("sort"));
@@ -23,17 +26,17 @@ export async function queryDashboard(db: D1Database, url: URL): Promise<Dashboar
     db.prepare(`${cte} SELECT COUNT(*) total, COALESCE(SUM(severity_rank=4),0) critical, COALESCE(SUM(severity_rank=3),0) high, COALESCE(SUM(known_exploited),0) known_exploited, COALESCE(SUM(kev),0) kev, COALESCE(SUM(zero_day),0) zero_day, COALESCE(SUM(patch_available=1),0) patch_available, COALESCE(SUM(kev=1 OR known_exploited=1),0) p1, COALESCE(SUM(kev=0 AND known_exploited=0 AND ((severity_rank=4 AND epss_percentile>=?) OR (severity_rank=3 AND epss_percentile>=?))),0) p2 FROM filtered`).bind(...bindings, PRIORITY_THRESHOLDS.criticalHighEpssPercentile, PRIORITY_THRESHOLDS.highVeryHighEpssPercentile).first<Record<string, number>>(),
     db.prepare(`${cte} SELECT severity_rank, COUNT(*) value FROM filtered GROUP BY severity_rank ORDER BY severity_rank DESC`).bind(...bindings).all<{ severity_rank: number; value: number }>(),
     db.prepare(`${cte} SELECT vendor, COUNT(*) value FROM filtered GROUP BY vendor ORDER BY value DESC LIMIT 12`).bind(...bindings).all<{ vendor: string; value: number }>(),
-    queryProductSeries(db, cte, bindings, params.get("vendor")),
+    coreOnly ? Promise.resolve([]) : queryProductSeries(db, cte, bindings, params.get("vendor")),
     queryChanges(db, cte, bindings),
     queryRecentChanges(db, cte, bindings),
     querySourceHealth(db),
     queryLatestReleaseEvent(db),
-    queryActivity(db, cte, bindings),
-    queryEpssMovers(db, cte, bindings),
-    queryEmergingVulnerabilities(db, cte, bindings),
-    queryVendorThreatSeries(db, cte, bindings),
-    queryChangeCategoryCounts(db, cte, bindings),
-    queryCweAnalytics(db, cte, bindings),
+    coreOnly ? Promise.resolve({ vulnerabilityActivity: [], threatSignalActivity: [] }) : queryActivity(db, cte, bindings),
+    coreOnly ? Promise.resolve([]) : queryEpssMovers(db, cte, bindings),
+    coreOnly ? Promise.resolve([]) : queryEmergingVulnerabilities(db, cte, bindings),
+    coreOnly ? Promise.resolve([]) : queryVendorThreatSeries(db, cte, bindings),
+    coreOnly ? Promise.resolve({ threat: 0, assessment: 0, advisory: 0, remediation: 0 }) : queryChangeCategoryCounts(db, cte, bindings),
+    coreOnly ? Promise.resolve({ knownCoverage: 0, total: 0, series: [] }) : queryCweAnalytics(db, cte, bindings),
   ]);
   const allRows = rowsResult.results ?? [];
   const hasMore = allRows.length > limit;
@@ -41,7 +44,7 @@ export async function queryDashboard(db: D1Database, url: URL): Promise<Dashboar
   const total = Number(summary?.total ?? 0);
   const p1 = Number(summary?.p1 ?? 0); const p2 = Number(summary?.p2 ?? 0);
 
-  return {
+  const response: DashboardResponse = {
     generatedAt: new Date().toISOString(),
     metrics: { total, critical: Number(summary?.critical ?? 0), high: Number(summary?.high ?? 0), knownExploited: Number(summary?.known_exploited ?? 0), kev: Number(summary?.kev ?? 0), zeroDay: Number(summary?.zero_day ?? 0), patchAvailable: Number(summary?.patch_available ?? 0) },
     changes,
@@ -62,6 +65,8 @@ export async function queryDashboard(db: D1Database, url: URL): Promise<Dashboar
     sourceHealth,
     latestReleaseEvent,
   };
+  console.log(JSON.stringify({ event: "dashboard_query", mode: projection ? "projection" : "canonical_fallback", include: coreOnly ? "core" : "full", durationMs: Number((performance.now() - startedAt).toFixed(2)) }));
+  return response;
 }
 
 async function queryRecentChanges(db: D1Database, cte: string, bindings: unknown[]): Promise<DashboardResponse["recentChanges"]> {
@@ -80,6 +85,15 @@ async function queryActivity(db: D1Database, cte: string, bindings: unknown[]): 
     vulnerabilityActivity: buckets.map(({ bucket, label }) => { const row = observed.get(bucket); return { bucket, label, critical: Number(row?.critical ?? 0), high: Number(row?.high ?? 0), medium: Number(row?.medium ?? 0), low: Number(row?.low ?? 0) }; }),
     threatSignalActivity: buckets.map(({ bucket, label }) => { const row = observed.get(bucket); return { bucket, label, knownExploited: Number(row?.known_exploited ?? 0), kev: Number(row?.kev ?? 0), zeroDay: Number(row?.zero_day ?? 0), highEpss: Number(row?.high_epss ?? 0) }; }),
   };
+}
+
+async function hasPublishedProjection(db: D1Database): Promise<boolean> {
+  try {
+    const state = await db.prepare("SELECT cve_count FROM dashboard_projection_state WHERE id='current' AND status='published'").first<{ cve_count: number }>();
+    return Number(state?.cve_count ?? 0) > 0;
+  } catch {
+    return false;
+  }
 }
 
 async function queryEpssMovers(db: D1Database, cte: string, bindings: unknown[]): Promise<DashboardResponse["epssMovers"]> {
@@ -131,7 +145,7 @@ async function queryVendorThreatSeries(db: D1Database, cte: string, bindings: un
 async function queryProductSeries(db: D1Database, cte: string, bindings: unknown[], vendorId: string | null): Promise<DashboardResponse["productSeries"]> {
   const result = await db.prepare(`${cte} SELECT COALESCE(p.family,p.name) label, COUNT(DISTINCT f.cve_id) value
     FROM filtered f JOIN advisory_cves pac ON pac.cve_id=f.cve_id JOIN advisories pa ON pa.id=pac.advisory_id
-    JOIN latest_revisions par ON par.advisory_id=pa.id
+    JOIN advisory_revisions par ON par.id=(SELECT par2.id FROM advisory_revisions par2 WHERE par2.advisory_id=pa.id ORDER BY par2.observed_at DESC LIMIT 1)
     JOIN affected_products pap ON pap.advisory_id=pa.id AND pap.advisory_revision_id=par.id AND (pap.cve_id=f.cve_id OR pap.cve_id IS NULL)
     JOIN products p ON p.id=pap.product_id WHERE (?='' OR pa.vendor_id=?)
     GROUP BY COALESCE(p.family,p.name) ORDER BY value DESC, label LIMIT 12`).bind(...bindings, vendorId ?? "", vendorId ?? "").all<{ label: string; value: number }>();
@@ -147,8 +161,8 @@ async function queryChangeCategoryCounts(db: D1Database, cte: string, bindings: 
 
 async function queryCweAnalytics(db: D1Database, cte: string, bindings: unknown[]): Promise<DashboardResponse["cweAnalytics"]> {
   const [coverage, series] = await Promise.all([
-    db.prepare(`${cte} SELECT COUNT(*) total, COALESCE(SUM(c.cwe IS NOT NULL AND trim(c.cwe)<>''),0) known FROM filtered f JOIN cves c ON c.id=f.cve_id`).bind(...bindings).first<Record<string, number>>(),
-    db.prepare(`${cte} SELECT c.cwe label, COUNT(*) value, COALESCE(SUM(f.severity_rank=4),0) critical, COALESCE(SUM(f.known_exploited),0) exploited FROM filtered f JOIN cves c ON c.id=f.cve_id WHERE c.cwe IS NOT NULL AND trim(c.cwe)<>'' GROUP BY c.cwe ORDER BY value DESC LIMIT 10`).bind(...bindings).all<Record<string, unknown>>(),
+    db.prepare(`${cte} SELECT COUNT(*) total, COALESCE(SUM(cwe IS NOT NULL AND trim(cwe)<>''),0) known FROM filtered`).bind(...bindings).first<Record<string, number>>(),
+    db.prepare(`${cte} SELECT cwe label, COUNT(*) value, COALESCE(SUM(severity_rank=4),0) critical, COALESCE(SUM(known_exploited),0) exploited FROM filtered WHERE cwe IS NOT NULL AND trim(cwe)<>'' GROUP BY cwe ORDER BY value DESC LIMIT 10`).bind(...bindings).all<Record<string, unknown>>(),
   ]);
   return { knownCoverage: Number(coverage?.known ?? 0), total: Number(coverage?.total ?? 0), series: (series.results ?? []).map((row) => ({ label: String(row.label), value: Number(row.value), critical: Number(row.critical), exploited: Number(row.exploited) })) };
 }
@@ -162,7 +176,38 @@ function rollingMonthBuckets(now: Date): Array<{ bucket: string; label: string }
   return values;
 }
 
-function buildFilteredCte(params: URLSearchParams): { cte: string; bindings: unknown[] } {
+function buildProjectedFilteredCte(params: URLSearchParams): { cte: string; bindings: unknown[] } {
+  const where = ["1=1"];
+  const bindings: unknown[] = [];
+  const add = (condition: string, ...values: unknown[]) => { where.push(condition); bindings.push(...values); };
+  if (params.get("vendor")) add("instr(vendor_ids, '|' || ? || '|') > 0", params.get("vendor"));
+  if (params.get("product")) add("product LIKE ? ESCAPE '\\'", `%${escapeLike(params.get("product")!)}%`);
+  const severity = params.get("severity")?.toLowerCase();
+  if (severity) add("severity_rank = ?", severity === "critical" ? 4 : severity === "high" ? 3 : severity === "medium" ? 2 : severity === "low" ? 1 : 0);
+  if (params.get("q")) {
+    const term = `%${escapeLike(params.get("q")!.slice(0, 100))}%`;
+    add("(cve_id LIKE ? ESCAPE '\\' OR title LIKE ? ESCAPE '\\' OR vendor LIKE ? ESCAPE '\\' OR product LIKE ? ESCAPE '\\')", term, term, term, term);
+  }
+  if (params.get("publishedFrom")) add("published_at >= ?", params.get("publishedFrom"));
+  if (params.get("publishedTo")) add("published_at < datetime(?, '+1 day')", params.get("publishedTo"));
+  if (params.get("modifiedFrom")) add("modified_at >= ?", params.get("modifiedFrom"));
+  if (params.get("modifiedTo")) add("modified_at < datetime(?, '+1 day')", params.get("modifiedTo"));
+  if (finiteParam(params, "cvssMin") != null) add("cvss >= ?", finiteParam(params, "cvssMin"));
+  if (finiteParam(params, "cvssMax") != null) add("cvss <= ?", finiteParam(params, "cvssMax"));
+  if (finiteParam(params, "epssPercentileMin") != null) add("epss_percentile >= ?", finiteParam(params, "epssPercentileMin"));
+  if (finiteParam(params, "epssMin") != null) add("epss >= ?", finiteParam(params, "epssMin"));
+  booleanFilterOuter(params, add, "kev", "kev");
+  booleanFilterOuter(params, add, "exploited", "known_exploited");
+  booleanFilterOuter(params, add, "zeroDay", "zero_day");
+  booleanFilterOuter(params, add, "patchAvailable", "patch_available");
+  booleanFilterOuter(params, add, "mitigationAvailable", "mitigation_available");
+  booleanFilterOuter(params, add, "workaroundAvailable", "workaround_available");
+  const priority = params.get("priority")?.toUpperCase();
+  if (priority === "P1" || priority === "P2" || priority === "P3") add("priority = ?", priority);
+  return { cte: `WITH filtered AS (SELECT cve_id,title,vendor,product,severity_rank,cvss,epss,epss_percentile,kev,known_exploited,zero_day,patch_available,mitigation_available,workaround_available,published_at,modified_at,cwe,priority FROM cve_dashboard_facts WHERE ${where.join(" AND ")})`, bindings };
+}
+
+function buildCanonicalFilteredCte(params: URLSearchParams): { cte: string; bindings: unknown[] } {
   const where = ["1=1"]; const bindings: unknown[] = [];
   const add = (condition: string, ...values: unknown[]) => { where.push(condition); bindings.push(...values); };
   if (params.get("vendor")) add("a.vendor_id = ?", params.get("vendor"));
@@ -224,7 +269,7 @@ function buildFilteredCte(params: URLSearchParams): { cte: string; bindings: unk
       MAX(rf.patch_available) patch_available,
       COALESCE(MAX(rf.mitigation_available),0) mitigation_available,
       COALESCE(MAX(rf.workaround_available),0) workaround_available,
-      MIN(a.published_at) published_at, MAX(a.source_updated_at) modified_at
+      MIN(a.published_at) published_at, MAX(a.source_updated_at) modified_at, c.cwe
     FROM cves c
       LEFT JOIN advisory_cves ac ON ac.cve_id=c.id
       LEFT JOIN advisories a ON a.id=ac.advisory_id AND COALESCE(a.published_at,a.source_updated_at)>=date('now','-${INTELLIGENCE_WINDOW_MONTHS} months')
