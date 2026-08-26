@@ -95,7 +95,9 @@ The focused suites cover normalized adapter fixtures, hashing and revision diffs
 ## API
 
 - `GET /api/dashboard` — filtered vulnerability summary, intelligence changes, priority distribution, activity/threat/vendor/product/CWE analytics, EPSS movers, release-event context, coverage/freshness, and cursor-paginated rows. Filter state is URL-native.
-- `GET /api/dashboard?include=core` — core metrics, rows, changes, source health, and release-event context while optional analytics load separately.
+- `GET /api/dashboard?include=core` — fast metrics, rows, changes, and source health while every analytics panel loads independently.
+- `GET /api/dashboard/analytics/:panel` — independently cached activity, emerging, EPSS-mover, vendor, CWE, product, and Patch Tuesday analytics.
+- `GET /api/dashboard/export?format=csv|json` — bounded export of up to 1,000 filtered rows with cursor continuation.
 - `GET /api/cves/:id` — canonical CVE data, vendor assertions, affected products, remediation, exploitation evidence, KEV, EPSS current/history, timeline, and source links.
 - `POST /api/internal/ingest` — bearer-protected, idempotent, source-allowlisted ingestion with bounded request size and per-source leases.
 - `GET /api/internal/health` — bearer-protected D1 size, row/index inventory, EPSS growth, representative query latency, and directional capacity projections.
@@ -103,7 +105,7 @@ The focused suites cover normalized adapter fixtures, hashing and revision diffs
 - `POST /api/internal/projection` — bearer-protected reconciliation/population of the disposable dashboard read model.
 - `GET /api/internal/monitor` — bearer-protected projection parity/freshness, source health, lease, batch-bound, and core-latency monitoring.
 
-Cross-origin access is available only for `GET /api/dashboard` and `GET /api/cves/:id`, and only to exact origins configured through `PUBLIC_DASHBOARD_ORIGINS`. The internal ingestion route never emits browser CORS headers.
+Cross-origin access is available only for the public read-only `GET /api/dashboard*` and `GET /api/cves/:id` routes, and only to exact origins configured through `PUBLIC_DASHBOARD_ORIGINS`. Internal routes never emit browser CORS headers.
 
 ## GitHub Pages + Cloudflare
 

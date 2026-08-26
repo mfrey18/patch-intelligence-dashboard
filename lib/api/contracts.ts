@@ -9,6 +9,41 @@ export interface EpssMover { cveId: string; vendor: string; product: string | nu
 export interface EmergingVulnerability { vulnerability: DashboardVulnerabilityRow; reasons: string[]; latestChangeAt: string | null; }
 export interface VendorThreatMetric { label: string; total: number; knownExploited: number; kev: number; zeroDay: number; highEpss: number; }
 export interface CweAnalytics { knownCoverage: number; total: number; series: Array<{ label: string; value: number; critical: number; exploited: number }>; }
+export type DashboardAnalyticsPanel = "activity" | "emerging" | "epss-movers" | "vendor-threats" | "cwe" | "products" | "patch-tuesday";
+export interface PatchTuesdayReleaseEvent {
+  id: string;
+  label: string;
+  eventDate: string;
+  total: number;
+  linkedTotal: number;
+  totalBasis: "vendor_reported" | "linked_advisories";
+  totalSourceUrl: string | null;
+  reportedAt: string | null;
+  reconciliationStatus: "matched" | "partial" | "overlinked" | "unreported";
+  linkDelta: number;
+  linkCoveragePercent: number | null;
+  critical: number;
+  high: number;
+  knownExploited: number;
+  zeroDay: number;
+  kev: number;
+  productFamilies: Array<{ label: string; value: number }>;
+  comparison: { label: string; eventDate: string; totalDelta: number; linkedTotal: number; linkedTotalDelta: number; criticalDelta: number; highDelta: number; knownExploitedDelta: number; zeroDayDelta: number; kevDelta: number } | null;
+}
+export interface DashboardAnalyticsResponse {
+  generatedAt: string;
+  panel: DashboardAnalyticsPanel;
+  productSeries?: DashboardResponse["productSeries"];
+  vulnerabilityActivity?: VulnerabilityActivityBucket[];
+  threatSignalActivity?: ThreatSignalBucket[];
+  epssMovers?: EpssMover[];
+  emergingVulnerabilities?: EmergingVulnerability[];
+  vendorThreatSeries?: VendorThreatMetric[];
+  changeCategoryCounts?: DashboardResponse["changeCategoryCounts"];
+  cweAnalytics?: CweAnalytics;
+  latestReleaseEvent?: PatchTuesdayReleaseEvent | null;
+  releaseEvents?: PatchTuesdayReleaseEvent[];
+}
 export interface DashboardResponse {
   generatedAt: string;
   metrics: DashboardMetrics;
@@ -28,7 +63,7 @@ export interface DashboardResponse {
   recentChanges: Array<{ cveId: string | null; advisoryId: string | null; changeType: string; summary: string; observedAt: string }>;
   nextCursor: string | null;
   sourceHealth: SourceHealth[];
-  latestReleaseEvent: { id: string; label: string; eventDate: string; total: number; linkedTotal: number; totalBasis: "vendor_reported" | "linked_advisories"; totalSourceUrl: string | null; reportedAt: string | null; critical: number; high: number; knownExploited: number; zeroDay: number; kev: number; productFamilies: Array<{ label: string; value: number }>; comparison: { label: string; eventDate: string; totalDelta: number; linkedTotal: number; criticalDelta: number; highDelta: number; knownExploitedDelta: number; zeroDayDelta: number; kevDelta: number } | null } | null;
+  latestReleaseEvent: PatchTuesdayReleaseEvent | null;
   demo?: boolean;
 }
 
@@ -41,6 +76,7 @@ export interface CveDetailResponse {
   exploitation: { knownExploited: boolean; zeroDay: boolean; evidence: Array<{ type: string; status: string; date: string | null; url: string; summary: string | null; source: string; sourceId: string; observedAt: string }> };
   kev: { active: boolean; dateAdded: string; dueDate: string | null; requiredAction: string | null; sourceUrl: string; sourceId: "cisa-kev"; observedAt: string } | null;
   epss: { current: { scoreDate: string; score: number; percentile: number; modelVersion: string | null; sourceId: "first-epss"; sourceUrl: string; observedAt: string } | null; history: Array<{ scoreDate: string; score: number; percentile: number; modelVersion: string | null; sourceId: "first-epss"; sourceUrl: string; observedAt: string }> };
+  advisoryRevisions: Array<{ advisoryId: string; vendor: string; sourceId: string; vendorAdvisoryId: string; observedAt: string; sourceUpdatedAt: string | null; changeTypes: string[]; sourceContentChanged: boolean | null; affectedProductsChanged: boolean | null; remediationChanged: boolean | null; sourceUrl: string }>;
   timeline: Array<{ observedAt: string; changeType: string; summary: string; sourceRunId: string }>;
   sourceLinks: Array<{ label: string; url: string }>;
 }

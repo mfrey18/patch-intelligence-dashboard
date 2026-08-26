@@ -9,7 +9,7 @@ const sourceIds = ["cisa-kev", "first-epss", "microsoft-msrc-csaf", "cisco-psirt
 
 function monitorDb(overrides = {}) {
   const state = { generated_at: "2026-08-26T11:00:00.000Z", cve_count: 7, parity_status: "passed", parity_checked_at: "2026-08-26T11:00:00.000Z", last_attempt_status: "success", last_attempt_at: "2026-08-26T11:00:00.000Z", last_attempt_error: null, ...overrides.state };
-  const sources = sourceIds.map((sourceId) => ({ source_id: sourceId, last_attempt: "2026-08-26T10:00:00.000Z", last_success: "2026-08-26T10:00:00.000Z", last_failure: null, result: "success", failed: 0, bound_hits_24h: 0, ...overrides.source }));
+  const sources = sourceIds.map((sourceId) => ({ source_id: sourceId, last_attempt: "2026-08-26T10:00:00.000Z", last_success: "2026-08-26T10:00:00.000Z", last_failure: null, result: "success", failed: 0, failures_24h: 0, bound_hits_24h: 0, ...overrides.source }));
   return {
     prepare(sql) {
       return {
@@ -44,19 +44,22 @@ test("operational monitor explains parity, lag, freshness, bounds, lease, and la
     state: { generated_at: "2026-08-24T00:00:00.000Z", cve_count: 8, parity_status: "failed", last_attempt_status: "failed", last_attempt_error: "parity mismatch" },
     actualCount: 7,
     latestSuccess: "2026-08-26T11:30:00.000Z",
-    source: { last_success: "2026-08-24T00:00:00.000Z", last_failure: "2026-08-26T11:00:00.000Z", bound_hits_24h: 4 },
-    ingestionLeases: [{ source_id: "microsoft-msrc-csaf", expires_at: "2026-08-26T12:10:00.000Z" }],
+    source: { last_success: "2026-08-24T00:00:00.000Z", last_failure: "2026-08-26T11:00:00.000Z", failures_24h: 4, bound_hits_24h: 4 },
+    ingestionLeases: [{ source_id: "microsoft-msrc-csaf", acquired_at: "2026-08-26T11:40:00.000Z", expires_at: "2026-08-26T11:50:00.000Z" }],
   }), new Date("2026-08-26T12:00:00.000Z"), async () => 1_500);
   assert.equal(result.status, "unhealthy");
   const codes = new Set(result.alerts.map((alert) => alert.code));
-  for (const code of ["projection_stale", "projection_count_mismatch", "projection_parity_unverified", "projection_refresh_failed", "projection_behind_ingestion", "source_stale", "source_latest_attempt_failed", "source_repeated_bound_hits", "ingestion_lease_active", "dashboard_core_slow"]) assert.ok(codes.has(code), code);
+  for (const code of ["projection_stale", "projection_count_mismatch", "projection_parity_unverified", "projection_refresh_failed", "projection_behind_ingestion", "source_stale", "source_latest_attempt_failed", "source_repeated_failures", "source_repeated_bound_hits", "ingestion_lease_expired", "dashboard_core_slow"]) assert.ok(codes.has(code), code);
 });
 
 test("operational thresholds and daily monitoring workflow are explicit", () => {
-  assert.deepEqual(OPERATIONAL_THRESHOLDS, { projectionStaleHours: 36, sourceStaleHours: 36, coreLatencyMs: 1000, repeatedBoundHits24h: 3 });
+  assert.deepEqual(OPERATIONAL_THRESHOLDS, { projectionStaleHours: 36, sourceStaleHours: 36, coreLatencyMs: 1000, repeatedBoundHits24h: 3, repeatedFailures24h: 3, leaseStuckMinutes: 8 });
   const workflow = readFileSync(new URL("../.github/workflows/operations-monitor.yml", import.meta.url), "utf8");
   assert.match(workflow, /api\/internal\/monitor/);
   assert.match(workflow, /databaseWarningBytes:400000000/);
   assert.match(workflow, /status != "unhealthy"/);
+  assert.match(workflow, /issues: write/);
+  assert.match(workflow, /Publish or resolve production alert/);
+  for (const code of ["source_stale", "source_repeated_failures", "projection_behind_ingestion", "projection_parity_unverified", "ingestion_lease_expired", "source_repeated_bound_hits", "dashboard_core_slow"]) assert.match(readFileSync(new URL("../lib/operations/operational-monitor.ts", import.meta.url), "utf8"), new RegExp(code));
   assert.doesNotMatch(workflow, /localhost/);
 });

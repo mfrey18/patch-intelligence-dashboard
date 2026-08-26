@@ -89,6 +89,14 @@ jobs:
           for query in 'vendor=microsoft' 'vendor=cisco' 'kev=true' 'priority=P1' 'patchAvailable=true'; do
             curl --fail --silent --show-error "$PUBLIC_API_BASE_URL/api/dashboard?limit=1&$query" | jq -e '.metrics.total >= 0 and (.rows | type == "array")' > /dev/null
           done
+          for panel in activity emerging epss-movers vendor-threats cwe products patch-tuesday; do
+            curl --fail --silent --show-error "$PUBLIC_API_BASE_URL/api/dashboard/analytics/$panel" | jq -e --arg panel "$panel" '.panel == $panel' > /dev/null
+          done
+          patch="$(curl --fail --silent --show-error "$PUBLIC_API_BASE_URL/api/dashboard/analytics/patch-tuesday")"
+          echo "$patch" | jq -e '(.releaseEvents | type == "array") and ([.releaseEvents[] | select((.totalBasis == "vendor_reported" and .totalSourceUrl == null) or .linkedTotal < 0 or (.reconciliationStatus != "matched" and .reconciliationStatus != "partial" and .reconciliationStatus != "overlinked" and .reconciliationStatus != "unreported"))] | length == 0)'
+          curl --fail --silent --show-error "$PUBLIC_API_BASE_URL/api/dashboard/export?format=json&limit=2" | jq -e '(.rows | type == "array") and (.rows | length <= 2)' > /dev/null
+          csv_type="$(curl --fail --silent --show-error -D - -o /dev/null "$PUBLIC_API_BASE_URL/api/dashboard/export?format=csv&limit=2" | tr -d '\r' | awk -F': ' 'tolower($1)=="content-type" {print $2}')"
+          test "$csv_type" = "text/csv; charset=utf-8"
       - name: Verify exact production CORS policy
         run: |
           allowed_origin="${PUBLIC_DASHBOARD_ORIGINS%%,*}"

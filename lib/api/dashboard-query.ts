@@ -1,4 +1,4 @@
-import type { DashboardResponse, SourceHealth } from "./contracts";
+import type { DashboardAnalyticsPanel, DashboardAnalyticsResponse, DashboardResponse, PatchTuesdayReleaseEvent, SourceHealth } from "./contracts";
 import type { DashboardVulnerabilityRow, NormalizedSeverity } from "../domain/types";
 import { calculatePriority, PRIORITY_THRESHOLDS } from "../domain/priority";
 import { EMERGING_CHANGE_WINDOW_DAYS, EPSS_MOVER_DATE_TOLERANCE_DAYS, EPSS_MOVER_LOOKBACK_DAYS, HIGH_EPSS_PERCENTILE, MIN_EPSS_PERCENTILE_DELTA, emergingReasons, intelligenceChangeCategory } from "../domain/intelligence";
@@ -30,7 +30,7 @@ export async function queryDashboard(db: D1Database, url: URL): Promise<Dashboar
     queryChanges(db, cte, bindings),
     queryRecentChanges(db, cte, bindings),
     querySourceHealth(db),
-    queryLatestReleaseEvent(db),
+    coreOnly ? Promise.resolve(null) : queryLatestReleaseEvent(db),
     coreOnly ? Promise.resolve({ vulnerabilityActivity: [], threatSignalActivity: [] }) : queryActivity(db, cte, bindings),
     coreOnly ? Promise.resolve([]) : queryEpssMovers(db, cte, bindings),
     coreOnly ? Promise.resolve([]) : queryEmergingVulnerabilities(db, cte, bindings),
@@ -67,6 +67,44 @@ export async function queryDashboard(db: D1Database, url: URL): Promise<Dashboar
   };
   console.log(JSON.stringify({ event: "dashboard_query", mode: projection ? "projection" : "canonical_fallback", include: coreOnly ? "core" : "full", durationMs: Number((performance.now() - startedAt).toFixed(2)) }));
   return response;
+}
+
+export const DASHBOARD_ANALYTICS_PANELS = new Set<DashboardAnalyticsPanel>(["activity", "emerging", "epss-movers", "vendor-threats", "cwe", "products", "patch-tuesday"]);
+
+export async function queryDashboardAnalytics(db: D1Database, url: URL, panel: DashboardAnalyticsPanel): Promise<DashboardAnalyticsResponse> {
+  const startedAt = performance.now();
+  if (panel === "patch-tuesday") {
+    const releaseEvents = await queryPatchTuesdayEvents(db, 13);
+    console.log(JSON.stringify({ event: "dashboard_analytics_query", panel, mode: "release_events", durationMs: Number((performance.now() - startedAt).toFixed(2)) }));
+    return { generatedAt: new Date().toISOString(), panel, latestReleaseEvent: releaseEvents[0] ?? null, releaseEvents: releaseEvents.slice(0, 12) };
+  }
+  const projection = await hasPublishedProjection(db);
+  const { cte, bindings } = projection ? buildProjectedFilteredCte(url.searchParams) : buildCanonicalFilteredCte(url.searchParams);
+  let data: Omit<DashboardAnalyticsResponse, "generatedAt" | "panel">;
+  switch (panel) {
+    case "activity": data = await queryActivity(db, cte, bindings); break;
+    case "emerging": {
+      const [emergingVulnerabilities, changeCategoryCounts] = await Promise.all([queryEmergingVulnerabilities(db, cte, bindings), queryChangeCategoryCounts(db, cte, bindings)]);
+      data = { emergingVulnerabilities, changeCategoryCounts };
+      break;
+    }
+    case "epss-movers": data = { epssMovers: await queryEpssMovers(db, cte, bindings) }; break;
+    case "vendor-threats": data = { vendorThreatSeries: await queryVendorThreatSeries(db, cte, bindings) }; break;
+    case "cwe": data = { cweAnalytics: await queryCweAnalytics(db, cte, bindings) }; break;
+    case "products": data = { productSeries: await queryProductSeries(db, cte, bindings, url.searchParams.get("vendor")) }; break;
+  }
+  console.log(JSON.stringify({ event: "dashboard_analytics_query", panel, mode: projection ? "projection" : "canonical_fallback", durationMs: Number((performance.now() - startedAt).toFixed(2)) }));
+  return { generatedAt: new Date().toISOString(), panel, ...data };
+}
+
+export async function queryDashboardExport(db: D1Database, url: URL): Promise<{ generatedAt: string; rows: DashboardVulnerabilityRow[]; nextCursor: string | null }> {
+  const projection = await hasPublishedProjection(db);
+  const { cte, bindings } = projection ? buildProjectedFilteredCte(url.searchParams) : buildCanonicalFilteredCte(url.searchParams);
+  const limit = clamp(Number(url.searchParams.get("limit") ?? 1_000), 1, 1_000);
+  const offset = decodeCursor(url.searchParams.get("cursor"));
+  const result = await db.prepare(`${cte} SELECT * FROM filtered ORDER BY ${sortSql(url.searchParams.get("sort"))} LIMIT ? OFFSET ?`).bind(...bindings, limit + 1, offset).all<BaseRow>();
+  const rows = result.results ?? [];
+  return { generatedAt: new Date().toISOString(), rows: rows.slice(0, limit).map(toDashboardRow), nextCursor: rows.length > limit ? encodeCursor(offset + limit) : null };
 }
 
 export interface ProjectionParityMetrics {
@@ -238,6 +276,10 @@ function buildProjectedFilteredCte(params: URLSearchParams): { cte: string; bind
   booleanFilterOuter(params, add, "workaroundAvailable", "workaround_available");
   const priority = params.get("priority")?.toUpperCase();
   if (priority === "P1" || priority === "P2" || priority === "P3") add("priority = ?", priority);
+  const view = params.get("view");
+  if (view === "needs-action") add("priority='P1'");
+  if (view === "changed") add("EXISTS(SELECT 1 FROM intelligence_changes view_changes WHERE view_changes.cve_id=cve_dashboard_facts.cve_id AND view_changes.observed_at>=datetime('now','-1 day'))");
+  if (view === "patch-new") add("patch_available=1 AND EXISTS(SELECT 1 FROM intelligence_changes view_changes WHERE view_changes.cve_id=cve_dashboard_facts.cve_id AND view_changes.observed_at>=datetime('now','-1 day') AND view_changes.change_type IN ('REMEDIATION_CHANGED','FIXED_VERSION_CHANGED','MITIGATION_ADDED','WORKAROUND_ADDED'))");
   return { cte: `WITH filtered AS (SELECT cve_id,title,vendor,product,severity_rank,cvss,epss,epss_percentile,kev,known_exploited,zero_day,patch_available,mitigation_available,workaround_available,published_at,modified_at,cwe,priority FROM cve_dashboard_facts WHERE ${where.join(" AND ")})`, bindings };
 }
 
@@ -270,6 +312,10 @@ function buildCanonicalFilteredCte(params: URLSearchParams): { cte: string; bind
   if (priority === "P1") outer.push("(kev=1 OR known_exploited=1)");
   if (priority === "P2") { outer.push("kev=0 AND known_exploited=0 AND ((severity_rank=4 AND epss_percentile>=?) OR (severity_rank=3 AND epss_percentile>=?))"); bindings.push(PRIORITY_THRESHOLDS.criticalHighEpssPercentile, PRIORITY_THRESHOLDS.highVeryHighEpssPercentile); }
   if (priority === "P3") { outer.push("kev=0 AND known_exploited=0 AND NOT ((severity_rank=4 AND COALESCE(epss_percentile,0)>=?) OR (severity_rank=3 AND COALESCE(epss_percentile,0)>=?))"); bindings.push(PRIORITY_THRESHOLDS.criticalHighEpssPercentile, PRIORITY_THRESHOLDS.highVeryHighEpssPercentile); }
+  const view = params.get("view");
+  if (view === "needs-action") outer.push("(kev=1 OR known_exploited=1)");
+  if (view === "changed") outer.push("EXISTS(SELECT 1 FROM intelligence_changes view_changes WHERE view_changes.cve_id=base.cve_id AND view_changes.observed_at>=datetime('now','-1 day'))");
+  if (view === "patch-new") outer.push("patch_available=1 AND EXISTS(SELECT 1 FROM intelligence_changes view_changes WHERE view_changes.cve_id=base.cve_id AND view_changes.observed_at>=datetime('now','-1 day') AND view_changes.change_type IN ('REMEDIATION_CHANGED','FIXED_VERSION_CHANGED','MITIGATION_ADDED','WORKAROUND_ADDED'))");
 
   const cte = `WITH current_epss AS (
     SELECT eo.cve_id, eo.score, eo.percentile FROM epss_observations eo JOIN epss_datasets ed ON ed.score_date=eo.score_date AND ed.is_current=1
@@ -358,19 +404,61 @@ async function querySourceHealth(db: D1Database): Promise<SourceHealth[]> {
 }
 
 async function queryLatestReleaseEvent(db: D1Database): Promise<DashboardResponse["latestReleaseEvent"]> {
-  const events = await db.prepare("SELECT id, label, event_date, source_url, reported_cve_count, reported_at FROM release_events WHERE event_type='patch_tuesday' ORDER BY event_date DESC LIMIT 2").all<{ id: string; label: string; event_date: string; source_url: string | null; reported_cve_count: number | null; reported_at: string | null }>();
-  const [event, previousEvent] = events.results ?? [];
-  if (!event) return null;
-  const stats = await queryReleaseEventStats(db, event.id);
-  const previous = previousEvent ? await queryReleaseEventStats(db, previousEvent.id) : null;
-  const products = await db.prepare(`SELECT COALESCE(p.family,p.name) label, COUNT(DISTINCT ap.cve_id) value FROM release_event_advisories rea JOIN advisories a ON a.id=rea.advisory_id JOIN advisory_revisions ar ON ar.id=(SELECT ar2.id FROM advisory_revisions ar2 WHERE ar2.advisory_id=a.id ORDER BY ar2.observed_at DESC LIMIT 1) JOIN affected_products ap ON ap.advisory_revision_id=ar.id JOIN products p ON p.id=ap.product_id WHERE rea.release_event_id=? GROUP BY COALESCE(p.family,p.name) ORDER BY value DESC LIMIT 8`).bind(event.id).all<{ label: string; value: number }>();
-  const linkedTotal = Number(stats.total ?? 0); const total = event.reported_cve_count == null ? linkedTotal : Number(event.reported_cve_count); const critical = Number(stats.critical ?? 0); const high = Number(stats.high ?? 0); const knownExploited = Number(stats.exploited ?? 0); const zeroDay = Number(stats.zero_day ?? 0); const kev = Number(stats.kev ?? 0);
-  const previousLinkedTotal = Number(previous?.total ?? 0); const previousTotal = previousEvent?.reported_cve_count == null ? previousLinkedTotal : Number(previousEvent.reported_cve_count);
-  return { id: event.id, label: event.label, eventDate: event.event_date, total, linkedTotal, totalBasis: event.reported_cve_count == null ? "linked_advisories" : "vendor_reported", totalSourceUrl: event.source_url, reportedAt: event.reported_at, critical, high, knownExploited, zeroDay, kev, productFamilies: (products.results ?? []).map((row) => ({ label: row.label, value: Number(row.value) })), comparison: previousEvent && previous ? { label: previousEvent.label, eventDate: previousEvent.event_date, totalDelta: total - previousTotal, linkedTotal: previousLinkedTotal, criticalDelta: critical - Number(previous.critical ?? 0), highDelta: high - Number(previous.high ?? 0), knownExploitedDelta: knownExploited - Number(previous.exploited ?? 0), zeroDayDelta: zeroDay - Number(previous.zero_day ?? 0), kevDelta: kev - Number(previous.kev ?? 0) } : null };
+  return (await queryPatchTuesdayEvents(db, 2))[0] ?? null;
 }
 
-async function queryReleaseEventStats(db: D1Database, eventId: string): Promise<Record<string, number>> {
-  return await db.prepare(`SELECT COUNT(DISTINCT ac.cve_id) total, COUNT(DISTINCT CASE WHEN ac.normalized_severity='critical' THEN ac.cve_id END) critical, COUNT(DISTINCT CASE WHEN ac.normalized_severity='high' THEN ac.cve_id END) high, COUNT(DISTINCT CASE WHEN EXISTS(SELECT 1 FROM exploit_evidence ee WHERE ee.cve_id=ac.cve_id AND ee.evidence_type='known_exploitation' AND ee.status='confirmed') THEN ac.cve_id END) exploited, COUNT(DISTINCT CASE WHEN EXISTS(SELECT 1 FROM exploit_evidence ee WHERE ee.cve_id=ac.cve_id AND ee.evidence_type='zero_day' AND ee.status='confirmed') THEN ac.cve_id END) zero_day, COUNT(DISTINCT CASE WHEN EXISTS(SELECT 1 FROM kev_entries k WHERE k.cve_id=ac.cve_id AND k.active=1) THEN ac.cve_id END) kev FROM release_event_advisories rea JOIN advisory_cves ac ON ac.advisory_id=rea.advisory_id WHERE rea.release_event_id=?`).bind(eventId).first<Record<string, number>>() ?? {};
+export async function queryPatchTuesdayEvents(db: D1Database, limit = 12): Promise<PatchTuesdayReleaseEvent[]> {
+  const boundedLimit = clamp(limit, 1, 24);
+  const events = await db.prepare("SELECT id,label,event_date,source_url,reported_cve_count,reported_at FROM release_events WHERE vendor_id='microsoft' AND event_type='patch_tuesday' ORDER BY event_date DESC LIMIT ?").bind(boundedLimit).all<Record<string, unknown>>();
+  const eventRows = events.results ?? [];
+  if (!eventRows.length) return [];
+  const ids = eventRows.map((row) => String(row.id));
+  const placeholders = ids.map(() => "?").join(",");
+  const [statsResult, productsResult] = await Promise.all([
+    db.prepare(`SELECT rea.release_event_id,
+      COUNT(DISTINCT ac.cve_id) linked_total,
+      COUNT(DISTINCT CASE WHEN ac.normalized_severity='critical' THEN ac.cve_id END) critical,
+      COUNT(DISTINCT CASE WHEN ac.normalized_severity='high' THEN ac.cve_id END) high,
+      COUNT(DISTINCT CASE WHEN EXISTS(SELECT 1 FROM exploit_evidence ee WHERE ee.cve_id=ac.cve_id AND ee.evidence_type='known_exploitation' AND ee.status='confirmed') THEN ac.cve_id END) exploited,
+      COUNT(DISTINCT CASE WHEN EXISTS(SELECT 1 FROM exploit_evidence ee WHERE ee.cve_id=ac.cve_id AND ee.evidence_type='zero_day' AND ee.status='confirmed') THEN ac.cve_id END) zero_day,
+      COUNT(DISTINCT CASE WHEN EXISTS(SELECT 1 FROM kev_entries k WHERE k.cve_id=ac.cve_id AND k.active=1) THEN ac.cve_id END) kev
+      FROM release_event_advisories rea JOIN advisory_cves ac ON ac.advisory_id=rea.advisory_id
+      WHERE rea.release_event_id IN (${placeholders}) GROUP BY rea.release_event_id`).bind(...ids).all<Record<string, unknown>>(),
+    db.prepare(`SELECT rea.release_event_id,COALESCE(p.family,p.name) label,COUNT(DISTINCT ac.cve_id) value
+      FROM release_event_advisories rea JOIN advisories a ON a.id=rea.advisory_id
+      JOIN advisory_revisions ar ON ar.id=(SELECT ar2.id FROM advisory_revisions ar2 WHERE ar2.advisory_id=a.id ORDER BY ar2.observed_at DESC LIMIT 1)
+      JOIN affected_products ap ON ap.advisory_revision_id=ar.id JOIN products p ON p.id=ap.product_id
+      JOIN advisory_cves ac ON ac.advisory_id=a.id AND (ap.cve_id IS NULL OR ac.cve_id=ap.cve_id)
+      WHERE rea.release_event_id IN (${placeholders}) GROUP BY rea.release_event_id,COALESCE(p.family,p.name)
+      ORDER BY rea.release_event_id,value DESC`).bind(...ids).all<Record<string, unknown>>(),
+  ]);
+  const stats = new Map((statsResult.results ?? []).map((row) => [String(row.release_event_id), row]));
+  const products = new Map<string, Array<{ label: string; value: number }>>();
+  for (const row of productsResult.results ?? []) {
+    const id = String(row.release_event_id); const list = products.get(id) ?? [];
+    if (list.length < 8) list.push({ label: String(row.label), value: Number(row.value) });
+    products.set(id, list);
+  }
+  const base = eventRows.map((event) => patchTuesdayEvent(event, stats.get(String(event.id)), products.get(String(event.id)) ?? []));
+  return base.map((event, index) => {
+    const previous = base[index + 1];
+    return { ...event, comparison: previous ? { label: previous.label, eventDate: previous.eventDate, totalDelta: event.total - previous.total, linkedTotal: previous.linkedTotal, linkedTotalDelta: event.linkedTotal - previous.linkedTotal, criticalDelta: event.critical - previous.critical, highDelta: event.high - previous.high, knownExploitedDelta: event.knownExploited - previous.knownExploited, zeroDayDelta: event.zeroDay - previous.zeroDay, kevDelta: event.kev - previous.kev } : null };
+  });
+}
+
+function patchTuesdayEvent(event: Record<string, unknown>, stats: Record<string, unknown> | undefined, productFamilies: Array<{ label: string; value: number }>): PatchTuesdayReleaseEvent {
+  const linkedTotal = Number(stats?.linked_total ?? 0);
+  const reported = event.reported_cve_count == null ? null : Number(event.reported_cve_count);
+  const total = reported ?? linkedTotal;
+  const linkDelta = reported == null ? 0 : linkedTotal - reported;
+  const reconciliationStatus = reported == null ? "unreported" : linkDelta === 0 ? "matched" : linkDelta < 0 ? "partial" : "overlinked";
+  return {
+    id: String(event.id), label: String(event.label), eventDate: String(event.event_date), total, linkedTotal,
+    totalBasis: reported == null ? "linked_advisories" : "vendor_reported", totalSourceUrl: nullableString(event.source_url), reportedAt: nullableString(event.reported_at),
+    reconciliationStatus, linkDelta, linkCoveragePercent: reported && reported > 0 ? Number((linkedTotal / reported * 100).toFixed(1)) : null,
+    critical: Number(stats?.critical ?? 0), high: Number(stats?.high ?? 0), knownExploited: Number(stats?.exploited ?? 0), zeroDay: Number(stats?.zero_day ?? 0), kev: Number(stats?.kev ?? 0),
+    productFamilies, comparison: null,
+  };
 }
 
 function toDashboardRow(row: BaseRow): DashboardVulnerabilityRow {

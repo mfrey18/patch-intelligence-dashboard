@@ -1,5 +1,5 @@
 import type { IngestionMode, IngestResult } from "./contracts";
-import { defaultDeltaStart, INGESTION_MODES, rollingWindowStart, windowDaysForMode } from "./operational-policy";
+import { defaultDeltaStart, INGESTION_MODES, rollingWindowStart, windowDaysForSource } from "./operational-policy";
 
 export interface IngestionRequest {
   mode?: IngestionMode;
@@ -39,7 +39,7 @@ export function normalizeIngestionRequest(sourceId: string, request: IngestionRe
   // one-millisecond trailing checkpoint that scheduled ingestion must replay.
   const windowEnd = mode === "delta" && !request.since && !request.until
     ? coverageEnd
-    : boundedWindowEnd(coverageStart, coverageEnd, windowDaysForMode(mode));
+    : boundedWindowEnd(coverageStart, coverageEnd, windowDaysForSource(sourceId, mode));
   return { id: checkpointId, sourceId, mode, coverageStart: coverageStart.toISOString(), coverageEnd: coverageEnd.toISOString(), windowStart: coverageStart.toISOString(), windowEnd: windowEnd.toISOString() };
 }
 
@@ -86,7 +86,7 @@ export async function advanceCheckpoint(db: D1Database, checkpoint: IngestionChe
     await db.prepare("UPDATE ingestion_checkpoints SET continuation_token=NULL, status='complete', last_run_id=?, last_error=NULL, completed_at=?, updated_at=? WHERE id=?").bind(result.runId, now, now, checkpoint.id).run();
     return { ...checkpoint, continuation: null, status: "complete" };
   }
-  const nextEnd = boundedWindowEnd(nextStart, coverageEnd, windowDaysForMode(checkpoint.mode));
+  const nextEnd = boundedWindowEnd(nextStart, coverageEnd, windowDaysForSource(checkpoint.sourceId, checkpoint.mode));
   await db.prepare("UPDATE ingestion_checkpoints SET window_start=?, window_end=?, continuation_token=NULL, status='pending', last_run_id=?, last_error=NULL, updated_at=? WHERE id=?").bind(nextStart.toISOString(), nextEnd.toISOString(), result.runId, now, checkpoint.id).run();
   return { ...checkpoint, windowStart: nextStart.toISOString(), windowEnd: nextEnd.toISOString(), continuation: null, status: "pending" };
 }

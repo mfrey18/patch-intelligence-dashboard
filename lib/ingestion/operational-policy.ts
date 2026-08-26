@@ -5,6 +5,10 @@ export const DELTA_LOOKBACK_DAYS = 3;
 export const BACKFILL_WINDOW_DAYS = 1;
 export const REPLAY_WINDOW_DAYS = 1;
 export const PATCH_TUESDAY_WINDOW_DAYS = 1;
+export const SOURCE_WINDOW_DAYS: Readonly<Record<string, number>> = Object.freeze({
+  "palo-alto-psirt-csaf": 7,
+  "mozilla-mfsa-yaml": 7,
+});
 
 // Workers Free permits 50 external subrequests per invocation. Twelve advisory
 // fetches leave room for discovery, redirects, OAuth, and configured retries.
@@ -36,6 +40,11 @@ export function windowDaysForMode(mode: IngestionMode): number {
   if (mode === "replay") return REPLAY_WINDOW_DAYS;
   if (mode === "patch_tuesday") return PATCH_TUESDAY_WINDOW_DAYS;
   return DELTA_LOOKBACK_DAYS;
+}
+
+export function windowDaysForSource(sourceId: string, mode: IngestionMode): number {
+  if (mode === "backfill" || mode === "replay") return SOURCE_WINDOW_DAYS[sourceId] ?? windowDaysForMode(mode);
+  return windowDaysForMode(mode);
 }
 
 export function clampBatchSize(value?: number): number {

@@ -28,6 +28,8 @@ test("delta, replay, backfill, and Patch Tuesday requests create bounded determi
   const backfill = normalizeIngestionRequest("microsoft-msrc-csaf", { mode: "backfill" }, now);
   assert.equal(backfill.coverageStart, "2026-02-21T00:00:00.000Z");
   assert.equal(backfill.windowEnd, "2026-02-21T23:59:59.999Z");
+  const paloAltoBackfill = normalizeIngestionRequest("palo-alto-psirt-csaf", { mode: "backfill" }, now);
+  assert.equal(paloAltoBackfill.windowEnd, "2026-02-27T23:59:59.999Z");
 
   const patchTuesday = normalizeIngestionRequest("microsoft-msrc-csaf", { mode: "patch_tuesday", since: "2026-08-11T00:00:00.000Z", until: "2026-08-12T00:00:00.000Z" }, now);
   assert.equal(patchTuesday.windowEnd, "2026-08-11T23:59:59.999Z");
@@ -124,7 +126,7 @@ test("CVE provenance acceptance requires authoritative links, observations, and 
     exploitation: { knownExploited: true, zeroDay: false, evidence: [{ type: "known_exploitation", status: "confirmed", date: "2026-08-20", url: "https://www.cisa.gov/known-exploited-vulnerabilities-catalog", summary: null, source: "CISA KEV", sourceId: "cisa-kev", observedAt: "2026-08-21T00:00:00Z" }] },
     kev: { active: true, dateAdded: "2026-08-20", dueDate: null, requiredAction: null, sourceUrl: "https://www.cisa.gov/known-exploited-vulnerabilities-catalog", sourceId: "cisa-kev", observedAt: "2026-08-21T00:00:00Z" },
     epss: { current: { scoreDate: "2026-08-21", score: 0.8, percentile: 0.97, modelVersion: null, sourceId: "first-epss", sourceUrl: "https://epss.empiricalsecurity.com/", observedAt: "2026-08-21T01:00:00Z" }, history: [{ scoreDate: "2026-08-21", score: 0.8, percentile: 0.97, modelVersion: null, sourceId: "first-epss", sourceUrl: "https://epss.empiricalsecurity.com/", observedAt: "2026-08-21T01:00:00Z" }] },
-    timeline: [], sourceLinks: [],
+    advisoryRevisions: [], timeline: [], sourceLinks: [],
   };
   assert.doesNotThrow(() => assertCveProvenance(detail));
   assert.throws(() => assertCveProvenance({ ...detail, remediations: [{ ...detail.remediations[0], sourceUrl: "" }] }), /authoritative HTTPS source URL/);
@@ -189,15 +191,28 @@ test("advisory revision history permits a material A to B to A reversion", async
   assert.match(repository, /previous\?\.contentHash === hashes\.contentHash/, "consecutive identical source states must still be idempotent");
 });
 
+test("CVE detail exposes component-level advisory revision comparison with provenance", async () => {
+  const query = await readFile(new URL("../lib/api/cve-query.ts", import.meta.url), "utf8");
+  const detail = await readFile(new URL("../app/cve/[id]/CveDetailClient.tsx", import.meta.url), "utf8");
+  assert.match(query, /LAG\(ar\.content_hash\)/);
+  assert.match(query, /LAG\(ar\.affected_products_hash\)/);
+  assert.match(query, /LAG\(ar\.remediation_hash\)/);
+  assert.match(detail, /Advisory Revision Comparison/);
+  assert.match(detail, /Affected products/);
+  assert.match(detail, /Remediation/);
+});
+
 test("Patch Tuesday totals retain Microsoft release-note provenance separately from linked CVEs", async () => {
   const migration = await readFile(new URL("../migrations/0004_release_event_reported_totals.sql", import.meta.url), "utf8");
   const query = await readFile(new URL("../lib/api/dashboard-query.ts", import.meta.url), "utf8");
   const dashboard = await readFile(new URL("../app/DashboardClient.tsx", import.meta.url), "utf8");
   assert.match(migration, /reported_cve_count/);
-  assert.match(query, /reported_cve_count == null \? linkedTotal/);
-  assert.match(query, /totalBasis: event\.reported_cve_count == null \? "linked_advisories" : "vendor_reported"/);
+  assert.match(query, /const reported = event\.reported_cve_count == null \? null/);
+  assert.match(query, /totalBasis: reported == null \? "linked_advisories" : "vendor_reported"/);
+  assert.match(query, /reconciliationStatus/);
   assert.match(dashboard, /Microsoft-reported CVEs/);
-  assert.match(dashboard, /linked advisory CVEs drive severity and threat metrics/);
+  assert.match(dashboard, /Successfully linked in D1/);
+  assert.match(dashboard, /Linked CVEs drive severity, threat, and product metrics/);
 });
 
 test("production implementation no longer claims a 24-month scope", async () => {

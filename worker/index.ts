@@ -1,7 +1,8 @@
 /** Cloudflare Worker entry point for the vinext-starter template. */
 import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } from "vinext/server/image-optimization";
 import handler from "vinext/server/app-router-entry";
-import { queryDashboard } from "../lib/api/dashboard-query";
+import { DASHBOARD_ANALYTICS_PANELS, queryDashboard, queryDashboardAnalytics, queryDashboardExport } from "../lib/api/dashboard-query";
+import type { DashboardAnalyticsPanel } from "../lib/api/contracts";
 import { queryCveDetail } from "../lib/api/cve-query";
 import { demoDashboard } from "../lib/demo-data";
 import { D1IngestionRepository, seedIngestionCatalog } from "../lib/ingestion/d1-repository";
@@ -47,13 +48,19 @@ interface ExecutionContext {
 const worker = {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
-    const publicApiRoute = url.pathname === "/api/dashboard" || url.pathname.startsWith("/api/cves/");
+    const publicApiRoute = url.pathname === "/api/dashboard" || url.pathname.startsWith("/api/dashboard/") || url.pathname.startsWith("/api/cves/");
 
     if (publicApiRoute && request.method === "OPTIONS") return withSecurityHeaders(publicCorsPreflight(request, env.PUBLIC_DASHBOARD_ORIGINS));
 
     if (url.pathname === "/api/dashboard" && request.method === "GET") {
       return dashboardResponse(request, env, ctx);
     }
+
+    if (url.pathname.startsWith("/api/dashboard/analytics/") && request.method === "GET") {
+      return dashboardAnalyticsResponse(request, env, ctx);
+    }
+
+    if (url.pathname === "/api/dashboard/export" && request.method === "GET") return dashboardExportResponse(request, env);
 
     if (url.pathname.startsWith("/api/cves/") && request.method === "GET") {
       const cveId = decodeURIComponent(url.pathname.slice("/api/cves/".length));
@@ -172,6 +179,48 @@ async function dashboardResponse(request: Request, env: Env, ctx: ExecutionConte
   }
 }
 
+async function dashboardAnalyticsResponse(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const url = new URL(request.url);
+  const panel = decodeURIComponent(url.pathname.slice("/api/dashboard/analytics/".length)) as DashboardAnalyticsPanel;
+  if (!DASHBOARD_ANALYTICS_PANELS.has(panel)) return json({ error: "Unknown dashboard analytics panel" }, 404, request, env);
+  const cache = (globalThis as unknown as { caches?: { default?: Cache } }).caches?.default;
+  const cacheKey = new Request(request.url, { method: "GET" });
+  if (cache) {
+    const cached = await cache.match(cacheKey);
+    if (cached) return addCorsToResponse(cached, request, env);
+  }
+  try {
+    const analytics = await queryDashboardAnalytics(env.DB, url, panel);
+    const response = json(analytics, 200, undefined, undefined, analyticsCacheControl(panel));
+    if (cache) ctx.waitUntil(cache.put(cacheKey, response.clone()));
+    return addCorsToResponse(response, request, env);
+  } catch (error) {
+    console.error(JSON.stringify({ event: "dashboard_analytics_error", panel, detail: safeError(error) }));
+    return json({ error: "Dashboard analytics panel is temporarily unavailable", panel }, 503, request, env);
+  }
+}
+
+function analyticsCacheControl(panel: DashboardAnalyticsPanel): string {
+  const edgeSeconds = panel === "patch-tuesday" ? 3_600 : panel === "epss-movers" ? 900 : panel === "products" ? 600 : 300;
+  return `public, max-age=60, s-maxage=${edgeSeconds}, stale-while-revalidate=${edgeSeconds * 2}`;
+}
+
+async function dashboardExportResponse(request: Request, env: Env): Promise<Response> {
+  const url = new URL(request.url); const format = url.searchParams.get("format") ?? "json";
+  if (format !== "json" && format !== "csv") return json({ error: "Export format must be csv or json" }, 400, request, env);
+  try {
+    const exported = await queryDashboardExport(env.DB, url);
+    if (format === "json") return json(exported, 200, request, env, "public, max-age=60, stale-while-revalidate=300");
+    const header = ["cve_id", "priority", "priority_reasons", "vendor", "product", "severity", "cvss", "epss", "epss_percentile", "kev", "known_exploited", "zero_day", "patch_available", "published_at", "modified_at"];
+    const lines = [header, ...exported.rows.map((row) => [row.cveId, row.priority.level, row.priority.reasons.join(" | "), row.vendor, row.product, row.severity, row.cvss, row.epss, row.epssPercentile, row.kev, row.knownExploited, row.zeroDay, row.patchAvailable, row.publishedAt, row.modifiedAt])].map((line) => line.map(csvCell).join(","));
+    const headers = new Headers({ "content-type": "text/csv; charset=utf-8", "content-disposition": 'attachment; filename="patch-intelligence-export.csv"', "cache-control": "public, max-age=60, stale-while-revalidate=300", "x-next-cursor": exported.nextCursor ?? "" });
+    addPublicCorsHeaders(headers, request, env.PUBLIC_DASHBOARD_ORIGINS);
+    return withSecurityHeaders(new Response(lines.join("\r\n"), { headers }));
+  } catch { return json({ error: "Dashboard export is temporarily unavailable" }, 503, request, env); }
+}
+
+function csvCell(value: unknown): string { const text = value == null ? "" : String(value); return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text; }
+
 async function handleInternalHealth(request: Request, env: Env): Promise<Response> {
   const authError = authorizeInternalRequest(request, env);
   if (authError) return authError;
@@ -221,8 +270,8 @@ async function acquireLease(db: D1Database, sourceId: string, holder: string): P
   return lease?.holder === holder;
 }
 async function releaseLease(db: D1Database, sourceId: string, holder: string): Promise<void> { await db.prepare("DELETE FROM ingestion_leases WHERE source_id=? AND holder=?").bind(sourceId, holder).run(); }
-function json(value: unknown, status = 200, request?: Request, env?: Env): Response {
-  const headers = new Headers({ "content-type": "application/json; charset=utf-8", "cache-control": status === 200 ? "public, max-age=60, stale-while-revalidate=300" : "no-store" });
+function json(value: unknown, status = 200, request?: Request, env?: Env, cacheControl?: string): Response {
+  const headers = new Headers({ "content-type": "application/json; charset=utf-8", "cache-control": status === 200 ? cacheControl ?? "public, max-age=60, stale-while-revalidate=300" : "no-store" });
   if (request && env) addPublicCorsHeaders(headers, request, env.PUBLIC_DASHBOARD_ORIGINS);
   return withSecurityHeaders(new Response(JSON.stringify(value), { status, headers }));
 }

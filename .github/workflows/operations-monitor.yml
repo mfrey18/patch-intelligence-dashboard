@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  issues: write
 
 concurrency:
   group: production-operations-monitor
@@ -56,3 +57,32 @@ jobs:
           name: production-operations-${{ github.run_id }}
           path: operations-monitor*.json
           retention-days: 30
+      - name: Publish or resolve production alert
+        if: always()
+        uses: actions/github-script@v8
+        env:
+          MONITOR_JOB_STATUS: ${{ job.status }}
+        with:
+          script: |
+            const fs = require('fs');
+            const title = '[Production] Patch intelligence operations alert';
+            const path = fs.existsSync('operations-monitor-with-capacity.json') ? 'operations-monitor-with-capacity.json' : 'operations-monitor.json';
+            let monitor = null;
+            if (fs.existsSync(path)) monitor = JSON.parse(fs.readFileSync(path, 'utf8'));
+            const alerts = monitor?.alerts ?? [{ severity: 'critical', code: 'monitor_unavailable', message: 'The production monitor did not produce a readable result.' }];
+            if (monitor?.databaseBytes >= monitor?.databaseWarningBytes) alerts.push({ severity: 'critical', code: 'd1_capacity', message: `D1 is ${monitor.databaseBytes} bytes; warning threshold is ${monitor.databaseWarningBytes} bytes.` });
+            if (process.env.MONITOR_JOB_STATUS !== 'success' && alerts.length === 0) alerts.push({ severity: 'critical', code: 'monitor_workflow_failed', message: 'The production monitoring workflow failed outside the runtime alert checks.' });
+            const unhealthy = process.env.MONITOR_JOB_STATUS !== 'success' || monitor?.status !== 'healthy' || alerts.length > 0;
+            const { data: issues } = await github.rest.issues.listForRepo({ owner: context.repo.owner, repo: context.repo.repo, state: 'open', per_page: 100 });
+            const existing = issues.find((issue) => issue.title === title && !issue.pull_request);
+            if (unhealthy) {
+              const body = [`Automated production monitoring requires attention.`, '', ...alerts.map((alert) => `- **${alert.severity.toUpperCase()} · ${alert.code}** — ${alert.message}`), '', `Run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`, `Captured: ${monitor?.capturedAt ?? 'unavailable'}`].join('\n');
+              if (existing) await github.rest.issues.update({ owner: context.repo.owner, repo: context.repo.repo, issue_number: existing.number, body });
+              else await github.rest.issues.create({ owner: context.repo.owner, repo: context.repo.repo, title, body, labels: ['operations'] }).catch(async (error) => {
+                if (error.status !== 422) throw error;
+                await github.rest.issues.create({ owner: context.repo.owner, repo: context.repo.repo, title, body });
+              });
+            } else if (existing) {
+              await github.rest.issues.createComment({ owner: context.repo.owner, repo: context.repo.repo, issue_number: existing.number, body: `Resolved automatically by ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}.` });
+              await github.rest.issues.update({ owner: context.repo.owner, repo: context.repo.repo, issue_number: existing.number, state: 'closed', state_reason: 'completed' });
+            }

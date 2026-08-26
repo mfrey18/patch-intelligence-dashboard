@@ -13,6 +13,7 @@ export function assertCveProvenance(detail: CveDetailResponse): void {
   for (const evidence of detail.exploitation.evidence) requireEvidence(evidence.sourceId, evidence.url, evidence.observedAt, `Exploitation evidence ${evidence.type}`);
   if (detail.kev) requireEvidence(detail.kev.sourceId, detail.kev.sourceUrl, detail.kev.observedAt, "CISA KEV assertion");
   for (const observation of detail.epss.history) requireEvidence(observation.sourceId, observation.sourceUrl, observation.observedAt, `EPSS observation ${observation.scoreDate}`);
+  for (const revision of detail.advisoryRevisions) requireEvidence(revision.sourceId, revision.sourceUrl, revision.observedAt, `Advisory revision ${revision.advisoryId}`);
 
   const components = detail.priority.components;
   if (components.kev !== Boolean(detail.kev?.active)) throw new Error("Priority KEV component does not match the sourced KEV assertion");
