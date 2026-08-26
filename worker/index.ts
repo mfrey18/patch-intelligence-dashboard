@@ -153,7 +153,10 @@ async function handleIngestion(request: Request, env: Env): Promise<Response> {
   const outcome = ingestionBatchOutcome(results);
   let projection: unknown = null;
   if (shouldRefreshProjection) {
-    try { projection = await refreshDashboardProjection(env.DB); }
+    try {
+      projection = await refreshDashboardProjection(env.DB);
+      await invalidateAnalyticsCaches(request);
+    }
     catch (error) { projection = { status: "failed", error: safeError(error), lastKnownGoodPreserved: true }; }
   }
   const projectionFailed = Boolean(projection && (projection as { status?: string }).status === "failed");
@@ -238,8 +241,18 @@ async function handleRetention(request: Request, env: Env): Promise<Response> {
 async function handleProjection(request: Request, env: Env): Promise<Response> {
   const authError = authorizeInternalRequest(request, env);
   if (authError) return authError;
-  try { return privateJson(await refreshDashboardProjection(env.DB)); }
+  try {
+    const result = await refreshDashboardProjection(env.DB);
+    await invalidateAnalyticsCaches(request);
+    return privateJson(result);
+  }
   catch (error) { return privateJson({ error: "Dashboard projection refresh failed", detail: safeError(error), lastKnownGoodPreserved: true }, 503); }
+}
+
+async function invalidateAnalyticsCaches(request: Request): Promise<void> {
+  const cache = (globalThis as unknown as { caches?: { default?: Cache } }).caches?.default;
+  if (!cache) return;
+  await Promise.all([...DASHBOARD_ANALYTICS_PANELS].map((panel) => cache.delete(new Request(new URL(`/api/dashboard/analytics/${panel}`, request.url), { method: "GET" }))));
 }
 
 async function handleMonitor(request: Request, env: Env): Promise<Response> {
