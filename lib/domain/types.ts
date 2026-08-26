@@ -68,6 +68,8 @@ export interface NormalizedReleaseEvent {
   sourceUrl?: string;
   reportedCveCount?: number;
   reportedAt?: string;
+  /** Vendor-reported affected-CVE counts by product family. Counts may overlap. */
+  reportedProductFamilies?: Array<{ label: string; value: number }>;
 }
 
 export interface NormalizedAdvisory {

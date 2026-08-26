@@ -27,7 +27,9 @@ export interface PatchTuesdayReleaseEvent {
   knownExploited: number;
   zeroDay: number;
   kev: number;
+  productFamilyBasis: "vendor_reported" | "linked_advisories";
   productFamilies: Array<{ label: string; value: number }>;
+  linkedProductFamilies: Array<{ label: string; value: number }>;
   comparison: { label: string; eventDate: string; totalDelta: number; linkedTotal: number; linkedTotalDelta: number; criticalDelta: number; highDelta: number; knownExploitedDelta: number; zeroDayDelta: number; kevDelta: number } | null;
 }
 export interface DashboardAnalyticsResponse {

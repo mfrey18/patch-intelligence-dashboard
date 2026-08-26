@@ -215,6 +215,23 @@ test("Patch Tuesday totals retain Microsoft release-note provenance separately f
   assert.match(dashboard, /Linked CVEs drive severity, threat, and product metrics/);
 });
 
+test("Patch Tuesday membership excludes Microsoft VEX records and preserves release-note provenance", async () => {
+  const microsoft = await readFile(new URL("../lib/ingestion/adapters/microsoft.ts", import.meta.url), "utf8");
+  const repository = await readFile(new URL("../lib/ingestion/d1-repository.ts", import.meta.url), "utf8");
+  const query = await readFile(new URL("../lib/api/dashboard-query.ts", import.meta.url), "utf8");
+  const migration = await readFile(new URL("../migrations/0007_patch_tuesday_authoritative_membership.sql", import.meta.url), "utf8");
+  assert.match(microsoft, /mayAssociateRelease.*documentType === "advisory"/s);
+  assert.match(repository, /source_url=CASE WHEN excluded\.reported_cve_count IS NOT NULL/);
+  assert.match(query, /vendor_advisory_id LIKE 'advisory:%'/);
+  assert.match(migration, /vendor_advisory_id` LIKE 'vex:%'/);
+  assert.match(migration, /vendor_advisory_id` LIKE 'release-note:%'/);
+  assert.match(migration, /UPDATE `sources`[\s\S]*'mozilla-mfsa-yaml'[\s\S]*THEN 1 ELSE 0 END/);
+  const deployment = await readFile(new URL("../.github/workflows/cloudflare.yml", import.meta.url), "utf8");
+  assert.match(deployment, /Refresh latest Microsoft release-note assertions/);
+  assert.match(deployment, /reconciliationStatus != "overlinked"/);
+  assert.match(deployment, /productFamilyBasis == "vendor_reported"/);
+});
+
 test("production implementation no longer claims a 24-month scope", async () => {
   const files = ["../README.md", "../app/DashboardClient.tsx", "../lib/api/dashboard-query.ts", "../docs/github-pages-cloudflare.md"];
   for (const file of files) assert.doesNotMatch(await readFile(new URL(file, import.meta.url), "utf8"), /24[- ]month|24 months|-24 months/i, file);

@@ -52,22 +52,27 @@ export function normalizeMicrosoftReleaseNote(raw: RawAdvisory, sanitize: (value
   const publishedAt = releaseDate.toISOString();
   const eventDate = publishedAt.slice(0, 10);
   const sourceUrl = `https://msrc.microsoft.com/update-guide/releaseNote/${releaseNumber}`;
+  const reportedProductFamilies = parseReportedProductFamilies(description);
   return [{
     vendor: "microsoft", sourceId: "microsoft-msrc-csaf", vendorAdvisoryId: `release-note:${releaseNumber}`,
     title, summary: `${reportedCveCount} Microsoft CVEs reported for ${title}.`, sourceUrl, publishedAt,
     sourceUpdatedAt: publishedAt, exploitationStatus: "unknown", zeroDayStatus: "unknown",
     cves: [], affectedProducts: [], remediations: [], exploitEvidence: [],
-    releaseEvent: { id: `microsoft-patch-tuesday-${eventDate.slice(0, 7)}`, eventType: "patch_tuesday", eventDate, label: `${new Intl.DateTimeFormat("en", { month: "long", year: "numeric", timeZone: "UTC" }).format(releaseDate)} Patch Tuesday`, sourceUrl, reportedCveCount, reportedAt: publishedAt },
+    releaseEvent: { id: `microsoft-patch-tuesday-${eventDate.slice(0, 7)}`, eventType: "patch_tuesday", eventDate, label: `${new Intl.DateTimeFormat("en", { month: "long", year: "numeric", timeZone: "UTC" }).format(releaseDate)} Patch Tuesday`, sourceUrl, reportedCveCount, reportedAt: publishedAt, reportedProductFamilies },
   }];
 }
 
 export function normalizeMicrosoftCsaf(raw: RawAdvisory, _observedAt: string, sanitize: (value: unknown) => string | undefined): NormalizedAdvisory[] {
+  // Microsoft VEX documents cover republished ecosystem/Linux vulnerabilities
+  // and are not the authoritative membership list for the monthly Microsoft
+  // Patch Tuesday total. Only MSRC advisory documents may join that event.
+  const mayAssociateRelease = raw.ref.metadata?.documentType === "advisory";
   return normalizeCsaf(raw, sanitize, {
     vendor: "microsoft",
     sourceId: "microsoft-msrc-csaf",
     splitByCve: true,
     advisoryIdPrefix: raw.ref.metadata?.documentType ?? "advisory",
-    releaseEvent: (publishedAt, sourceUrl) => isSecondTuesday(publishedAt) ? { id: `microsoft-patch-tuesday-${publishedAt.slice(0, 7)}`, eventType: "patch_tuesday", eventDate: publishedAt.slice(0, 10), label: `${new Intl.DateTimeFormat("en", { month: "long", year: "numeric", timeZone: "UTC" }).format(new Date(publishedAt))} Patch Tuesday`, sourceUrl } : undefined,
+    releaseEvent: (publishedAt, sourceUrl) => mayAssociateRelease && isSecondTuesday(publishedAt) ? { id: `microsoft-patch-tuesday-${publishedAt.slice(0, 7)}`, eventType: "patch_tuesday", eventDate: publishedAt.slice(0, 10), label: `${new Intl.DateTimeFormat("en", { month: "long", year: "numeric", timeZone: "UTC" }).format(new Date(publishedAt))} Patch Tuesday`, sourceUrl } : undefined,
   });
 }
 
@@ -77,6 +82,24 @@ export const normalizeMicrosoftCvrf = normalizeMicrosoftCsaf;
 function isSecondTuesday(value: string): boolean {
   const date = new Date(value);
   return date.getUTCDay() === 2 && date.getUTCDate() >= 8 && date.getUTCDate() <= 14;
+}
+
+function parseReportedProductFamilies(description: string): Array<{ label: string; value: number }> {
+  const releaseHeading = /This release consists of[\s\S]*?<\/h2>/i.exec(description);
+  if (!releaseHeading) return [];
+  const table = /<table[^>]*>([\s\S]*?)<\/table>/i.exec(description.slice(releaseHeading.index + releaseHeading[0].length))?.[1];
+  if (!table) return [];
+  const values: Array<{ label: string; value: number }> = [];
+  for (const row of table.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/gi)) {
+    const cells = [...row[1].matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi)].map((cell) => stripHtml(cell[1]));
+    const value = Number(cells[2]?.replaceAll(",", ""));
+    if (cells[0] && Number.isSafeInteger(value) && value >= 0) values.push({ label: cells[0], value });
+  }
+  return values;
+}
+
+function stripHtml(value: string): string {
+  return value.replace(/<[^>]+>/g, " ").replaceAll("&amp;", "&").replaceAll("&nbsp;", " ").replace(/\s+/g, " ").trim();
 }
 
 function releaseNoteRefs(since: Date, until: Date): AdvisoryRef[] {

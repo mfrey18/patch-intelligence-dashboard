@@ -409,7 +409,7 @@ async function queryLatestReleaseEvent(db: D1Database): Promise<DashboardRespons
 
 export async function queryPatchTuesdayEvents(db: D1Database, limit = 12): Promise<PatchTuesdayReleaseEvent[]> {
   const boundedLimit = clamp(limit, 1, 24);
-  const events = await db.prepare("SELECT id,label,event_date,source_url,reported_cve_count,reported_at FROM release_events WHERE vendor_id='microsoft' AND event_type='patch_tuesday' ORDER BY event_date DESC LIMIT ?").bind(boundedLimit).all<Record<string, unknown>>();
+  const events = await db.prepare("SELECT id,label,event_date,source_url,reported_cve_count,reported_at,reported_product_families_json FROM release_events WHERE vendor_id='microsoft' AND event_type='patch_tuesday' ORDER BY event_date DESC LIMIT ?").bind(boundedLimit).all<Record<string, unknown>>();
   const eventRows = events.results ?? [];
   if (!eventRows.length) return [];
   const ids = eventRows.map((row) => String(row.id));
@@ -422,14 +422,17 @@ export async function queryPatchTuesdayEvents(db: D1Database, limit = 12): Promi
       COUNT(DISTINCT CASE WHEN EXISTS(SELECT 1 FROM exploit_evidence ee WHERE ee.cve_id=ac.cve_id AND ee.evidence_type='known_exploitation' AND ee.status='confirmed') THEN ac.cve_id END) exploited,
       COUNT(DISTINCT CASE WHEN EXISTS(SELECT 1 FROM exploit_evidence ee WHERE ee.cve_id=ac.cve_id AND ee.evidence_type='zero_day' AND ee.status='confirmed') THEN ac.cve_id END) zero_day,
       COUNT(DISTINCT CASE WHEN EXISTS(SELECT 1 FROM kev_entries k WHERE k.cve_id=ac.cve_id AND k.active=1) THEN ac.cve_id END) kev
-      FROM release_event_advisories rea JOIN advisory_cves ac ON ac.advisory_id=rea.advisory_id
-      WHERE rea.release_event_id IN (${placeholders}) GROUP BY rea.release_event_id`).bind(...ids).all<Record<string, unknown>>(),
+      FROM release_event_advisories rea JOIN advisories a ON a.id=rea.advisory_id
+      JOIN advisory_cves ac ON ac.advisory_id=rea.advisory_id
+      WHERE rea.release_event_id IN (${placeholders}) AND a.vendor_advisory_id LIKE 'advisory:%'
+      GROUP BY rea.release_event_id`).bind(...ids).all<Record<string, unknown>>(),
     db.prepare(`SELECT rea.release_event_id,COALESCE(p.family,p.name) label,COUNT(DISTINCT ac.cve_id) value
       FROM release_event_advisories rea JOIN advisories a ON a.id=rea.advisory_id
       JOIN advisory_revisions ar ON ar.id=(SELECT ar2.id FROM advisory_revisions ar2 WHERE ar2.advisory_id=a.id ORDER BY ar2.observed_at DESC LIMIT 1)
       JOIN affected_products ap ON ap.advisory_revision_id=ar.id JOIN products p ON p.id=ap.product_id
       JOIN advisory_cves ac ON ac.advisory_id=a.id AND (ap.cve_id IS NULL OR ac.cve_id=ap.cve_id)
-      WHERE rea.release_event_id IN (${placeholders}) GROUP BY rea.release_event_id,COALESCE(p.family,p.name)
+      WHERE rea.release_event_id IN (${placeholders}) AND a.vendor_advisory_id LIKE 'advisory:%'
+      GROUP BY rea.release_event_id,COALESCE(p.family,p.name)
       ORDER BY rea.release_event_id,value DESC`).bind(...ids).all<Record<string, unknown>>(),
   ]);
   const stats = new Map((statsResult.results ?? []).map((row) => [String(row.release_event_id), row]));
@@ -446,19 +449,35 @@ export async function queryPatchTuesdayEvents(db: D1Database, limit = 12): Promi
   });
 }
 
-function patchTuesdayEvent(event: Record<string, unknown>, stats: Record<string, unknown> | undefined, productFamilies: Array<{ label: string; value: number }>): PatchTuesdayReleaseEvent {
+function patchTuesdayEvent(event: Record<string, unknown>, stats: Record<string, unknown> | undefined, linkedProductFamilies: Array<{ label: string; value: number }>): PatchTuesdayReleaseEvent {
   const linkedTotal = Number(stats?.linked_total ?? 0);
   const reported = event.reported_cve_count == null ? null : Number(event.reported_cve_count);
   const total = reported ?? linkedTotal;
   const linkDelta = reported == null ? 0 : linkedTotal - reported;
   const reconciliationStatus = reported == null ? "unreported" : linkDelta === 0 ? "matched" : linkDelta < 0 ? "partial" : "overlinked";
+  const reportedProductFamilies = parseProductFamilies(event.reported_product_families_json);
   return {
     id: String(event.id), label: String(event.label), eventDate: String(event.event_date), total, linkedTotal,
     totalBasis: reported == null ? "linked_advisories" : "vendor_reported", totalSourceUrl: nullableString(event.source_url), reportedAt: nullableString(event.reported_at),
     reconciliationStatus, linkDelta, linkCoveragePercent: reported && reported > 0 ? Number((linkedTotal / reported * 100).toFixed(1)) : null,
     critical: Number(stats?.critical ?? 0), high: Number(stats?.high ?? 0), knownExploited: Number(stats?.exploited ?? 0), zeroDay: Number(stats?.zero_day ?? 0), kev: Number(stats?.kev ?? 0),
-    productFamilies, comparison: null,
+    productFamilyBasis: reportedProductFamilies.length ? "vendor_reported" : "linked_advisories",
+    productFamilies: reportedProductFamilies.length ? reportedProductFamilies : linkedProductFamilies,
+    linkedProductFamilies, comparison: null,
   };
+}
+
+function parseProductFamilies(value: unknown): Array<{ label: string; value: number }> {
+  if (typeof value !== "string") return [];
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.flatMap((item) => {
+      if (!item || typeof item !== "object") return [];
+      const label = (item as { label?: unknown }).label; const rawValue = (item as { value?: unknown }).value;
+      return typeof label === "string" && Number.isFinite(Number(rawValue)) ? [{ label, value: Number(rawValue) }] : [];
+    });
+  } catch { return []; }
 }
 
 function toDashboardRow(row: BaseRow): DashboardVulnerabilityRow {

@@ -66,6 +66,15 @@ jobs:
             INGEST_SECRET
         env:
           INGEST_SECRET: ${{ secrets.INGEST_SECRET }}
+      - name: Refresh latest Microsoft release-note assertions
+        env:
+          INGEST_SECRET: ${{ secrets.INGEST_SECRET }}
+        run: |
+          event_date="$(curl --fail --silent --show-error "$PUBLIC_API_BASE_URL/api/dashboard/analytics/patch-tuesday" | jq -er '.releaseEvents[0].eventDate')"
+          response="$(jq -n --arg since "${event_date}T00:00:00.000Z" --arg until "${event_date}T23:59:59.999Z" --arg checkpoint "deploy:release-note:${event_date}:${GITHUB_SHA}" '{sources:["microsoft-msrc-csaf"],mode:"replay",since:$since,until:$until,checkpointId:$checkpoint,maxItems:1,refreshProjection:false}' |
+            curl --fail-with-body --silent --show-error -X POST -H "Authorization: Bearer $INGEST_SECRET" -H 'content-type: application/json' --data-binary @- "$PUBLIC_API_BASE_URL/api/internal/ingest")"
+          echo "$response" | jq .
+          echo "$response" | jq -e '.results[0].sourceId == "microsoft-msrc-csaf" and .results[0].counts.failed == 0 and .results[0].processed == 1'
       - name: Populate dashboard read model
         env:
           INGEST_SECRET: ${{ secrets.INGEST_SECRET }}
@@ -93,7 +102,7 @@ jobs:
             curl --fail --silent --show-error "$PUBLIC_API_BASE_URL/api/dashboard/analytics/$panel" | jq -e --arg panel "$panel" '.panel == $panel' > /dev/null
           done
           patch="$(curl --fail --silent --show-error "$PUBLIC_API_BASE_URL/api/dashboard/analytics/patch-tuesday")"
-          echo "$patch" | jq -e '(.releaseEvents | type == "array") and ([.releaseEvents[] | select((.totalBasis == "vendor_reported" and .totalSourceUrl == null) or .linkedTotal < 0 or (.reconciliationStatus != "matched" and .reconciliationStatus != "partial" and .reconciliationStatus != "overlinked" and .reconciliationStatus != "unreported"))] | length == 0)'
+          echo "$patch" | jq -e '(.releaseEvents | type == "array") and (.releaseEvents | length > 0) and (.releaseEvents[0].reconciliationStatus != "overlinked") and (.releaseEvents[0].totalSourceUrl | startswith("https://msrc.microsoft.com/update-guide/releaseNote/")) and (.releaseEvents[0].productFamilyBasis == "vendor_reported") and ([.releaseEvents[] | select((.totalBasis == "vendor_reported" and .totalSourceUrl == null) or .linkedTotal < 0 or (.reconciliationStatus != "matched" and .reconciliationStatus != "partial" and .reconciliationStatus != "overlinked" and .reconciliationStatus != "unreported"))] | length == 0)'
           curl --fail --silent --show-error "$PUBLIC_API_BASE_URL/api/dashboard/export?format=json&limit=2" | jq -e '(.rows | type == "array") and (.rows | length <= 2)' > /dev/null
           csv_type="$(curl --fail --silent --show-error -D - -o /dev/null "$PUBLIC_API_BASE_URL/api/dashboard/export?format=csv&limit=2" | tr -d '\r' | awk -F': ' 'tolower($1)=="content-type" {print $2}')"
           test "$csv_type" = "text/csv; charset=utf-8"

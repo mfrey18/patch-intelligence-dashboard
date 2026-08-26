@@ -15,11 +15,15 @@ For every enabled source:
 
 The Worker deployment smoke test exercises all panel endpoints, the Patch Tuesday reconciliation contract, and bounded CSV/JSON export. The daily operations monitor independently checks freshness, repeated failures, batch-bound pressure, projection parity/lag, leases, core latency, and D1 capacity.
 
-## Snapshot before this milestone
+## August 26, 2026 validation snapshot
 
-The August 26, 2026 production snapshot contained 5,149 Microsoft, 112 Cisco, 58 Mozilla, and zero Palo Alto CVEs in the six-month read model. The Palo Alto source was fresh but its latest three-day delta correctly discovered zero new records; that did **not** prove historical population. The authoritative RSS feed and `/csaf/{advisory-id}` JSON endpoint were verified independently. A resumable six-month Palo Alto backfill is therefore required before its coverage can be described as populated.
+The production read model contained 5,149 Microsoft, 112 Cisco, 1,002 Palo Alto, and 58 Mozilla CVEs. The Palo Alto increase followed the bounded six-month population and includes PAN-SA advisories that authoritatively republish upstream Chromium CVEs affecting Prisma Browser; those records remain Palo Alto advisory assertions and do not replace canonical CVE identity. The public sample set retained Palo Alto product provenance. Palo Alto patch availability remained unknown because the sampled CSAF assertions did not expose the shared adapter's explicit `vendor_fix` semantics; the dashboard does not infer a patch from an advisory's existence.
 
-Microsoft's repeated batch-bound warning reflected the completed high-volume historical population and is expected to age out of the 24-hour alert window. It remains actionable if it recurs during ordinary daily delta operation.
+CISA KEV synchronized 1,676 catalog entries with no failed records. FIRST EPSS processed the bulk daily dataset and inserted 9,598 observations relevant to CVEs retained in D1. Microsoft and Cisco retained resumable checkpoints: Microsoft was still bounded under the Free-plan batch policy, while Cisco's six-month backfill remained at an April daily window. Palo Alto and Mozilla each had an inert zero-width delta checkpoint left by older orchestration; migration 0007 closes only those exact completed-work states.
+
+The initial August Patch Tuesday validation exposed 422 Microsoft-reported CVEs but 669 linked records. The excess was exactly 247 Microsoft VEX ecosystem records incorrectly associated by publication date. Patch Tuesday membership now excludes VEX documents, legacy links are removed, and the canonical event URL is restored to Microsoft's release note. The release note's product-family table is stored as vendor-reported analytics; linked product assertions remain separately available and drive severity and threat counts.
+
+Only the six validated production sources are marked enabled for freshness monitoring. Registered adapters in later expansion groups stay hidden from production-health expectations until deliberately promoted.
 
 ## Expansion gate
 

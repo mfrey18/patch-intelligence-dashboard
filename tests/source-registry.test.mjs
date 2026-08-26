@@ -3,7 +3,7 @@ import test from "node:test";
 
 import "./helpers/register-typescript.mjs";
 
-const { SOURCE_CATALOG, SOURCE_IDS } = await import("../lib/ingestion/source-catalog.ts");
+const { PRODUCTION_SOURCE_IDS, SOURCE_CATALOG, SOURCE_IDS } = await import("../lib/ingestion/source-catalog.ts");
 const { createVendorAdapter, defaultSourceIds } = await import("../lib/ingestion/source-registry.ts");
 
 test("source catalog has unique centralized IDs and resolves every vendor adapter", () => {
@@ -13,6 +13,12 @@ test("source catalog has unique centralized IDs and resolves every vendor adapte
   }
   assert.equal(createVendorAdapter("cisa-kev", {}), null);
   assert.equal(createVendorAdapter("first-epss", {}), null);
+});
+
+test("production health allowlist contains only the six validated sources", () => {
+  assert.deepEqual([...PRODUCTION_SOURCE_IDS], [
+    "cisa-kev", "first-epss", "microsoft-msrc-csaf", "cisco-psirt-csaf", "palo-alto-psirt-csaf", "mozilla-mfsa-yaml",
+  ]);
 });
 
 test("default ingestion excludes credential-dependent sources until configured", () => {

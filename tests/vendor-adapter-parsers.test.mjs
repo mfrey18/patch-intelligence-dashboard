@@ -18,7 +18,7 @@ test("Microsoft release notes preserve the authoritative reported Patch Tuesday 
   const [advisory] = normalizeMicrosoftReleaseNote({
     ref: { id: "release-note:2026-Aug", url: "https://api.msrc.microsoft.com/sug/v2.0/en-US/releaseNote/2026-Aug", metadata: { documentType: "release-note", releaseNumber: "2026-Aug" } },
     contentType: "application/json",
-    body: { releaseNumber: "2026-Aug", releaseDate: "2026-08-11T10:00:00-04:00", title: "August 2026 Security Updates", description: '<h2 id="count">This release consists of 422 Microsoft CVEs:</h2>' },
+    body: { releaseNumber: "2026-Aug", releaseDate: "2026-08-11T10:00:00-04:00", title: "August 2026 Security Updates", description: '<h2 id="count">This release consists of 422 Microsoft CVEs:</h2><table><thead><tr><th>Product Family</th><th>Updates</th><th>Vulnerabilities Addressed</th></tr></thead><tbody><tr><td>Windows</td><td>1</td><td>236</td></tr><tr><td>Office &amp; Apps</td><td>1</td><td>98</td></tr></tbody></table>' },
     fetchedAt: observedAt,
     resolvedUrl: "https://api.msrc.microsoft.com/sug/v2.0/en-US/releaseNote/2026-Aug",
   }, sanitize);
@@ -27,6 +27,7 @@ test("Microsoft release notes preserve the authoritative reported Patch Tuesday 
   assert.equal(advisory.releaseEvent.reportedCveCount, 422);
   assert.equal(advisory.releaseEvent.eventDate, "2026-08-11");
   assert.equal(advisory.releaseEvent.sourceUrl, "https://msrc.microsoft.com/update-guide/releaseNote/2026-Aug");
+  assert.deepEqual(advisory.releaseEvent.reportedProductFamilies, [{ label: "Windows", value: 236 }, { label: "Office & Apps", value: 98 }]);
   assert.equal(advisory.summary, "422 Microsoft CVEs reported for August 2026 Security Updates.");
 });
 
@@ -77,6 +78,13 @@ test("Microsoft does not infer exploitation, zero-day, or remediation from sever
   assert.deepEqual(advisory.exploitEvidence, []);
   assert.deepEqual(advisory.remediations, []);
   assert.equal(advisory.affectedProducts[0].status, "affected");
+});
+
+test("Microsoft excludes VEX-only ecosystem records from Patch Tuesday membership", () => {
+  const raw = makeMicrosoftCvrf();
+  raw.ref.metadata.documentType = "vex";
+  const [advisory] = normalizeMicrosoftCvrf(raw, observedAt, sanitize);
+  assert.equal(advisory.releaseEvent, undefined);
 });
 
 test("Microsoft emits exploitation and remediation only from explicit vendor fields", () => {
