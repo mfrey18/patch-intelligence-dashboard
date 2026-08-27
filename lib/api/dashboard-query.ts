@@ -379,7 +379,7 @@ async function queryChanges(db: D1Database, cte: string, bindings: unknown[]): P
 async function querySourceHealth(db: D1Database): Promise<SourceHealth[]> {
   const result = await db.prepare(`SELECT s.id source_id, s.name, r.started_at last_attempt,
     (SELECT completed_at FROM source_runs ok WHERE ok.source_id=s.id AND (ok.status IN ('success','unchanged') OR (ok.status='partial' AND ok.records_failed=0)) ORDER BY ok.completed_at DESC LIMIT 1) last_success,
-    (SELECT completed_at FROM source_runs bad WHERE bad.source_id=s.id AND (bad.status='failed' OR bad.records_failed>0) ORDER BY bad.completed_at DESC LIMIT 1) last_failure,
+    (SELECT started_at FROM source_runs bad WHERE bad.source_id=s.id AND (bad.status='failed' OR bad.records_failed>0) ORDER BY bad.started_at DESC LIMIT 1) last_failure,
     CAST((julianday(r.completed_at)-julianday(r.started_at))*86400000 AS INTEGER) duration_ms, r.status result, r.ingestion_mode,
     COALESCE(r.records_discovered,0) discovered, COALESCE(r.records_inserted,0) inserted, COALESCE(r.records_changed,0) changed, COALESCE(r.records_unchanged,0) unchanged, COALESCE(r.records_failed,0) failed, COALESCE(r.bound_hit,0) bound_hit, r.error_summary,
     l.expires_at lease_expires_at,

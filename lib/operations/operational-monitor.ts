@@ -34,7 +34,7 @@ export async function captureOperationalMonitor(db: D1Database, now = new Date()
     db.prepare("SELECT COUNT(*) count FROM cve_dashboard_facts").first<{ count: number }>(),
     db.prepare(`SELECT s.id source_id,r.started_at last_attempt,r.completed_at,r.status result,COALESCE(r.records_failed,0) failed,
       (SELECT completed_at FROM source_runs ok WHERE ok.source_id=s.id AND (ok.status IN ('success','unchanged') OR (ok.status='partial' AND ok.records_failed=0)) ORDER BY ok.completed_at DESC LIMIT 1) last_success,
-      (SELECT completed_at FROM source_runs bad WHERE bad.source_id=s.id AND (bad.status='failed' OR bad.records_failed>0) ORDER BY bad.completed_at DESC LIMIT 1) last_failure,
+      (SELECT started_at FROM source_runs bad WHERE bad.source_id=s.id AND (bad.status='failed' OR bad.records_failed>0) ORDER BY bad.started_at DESC LIMIT 1) last_failure,
       (SELECT COUNT(*) FROM source_runs failures WHERE failures.source_id=s.id AND (failures.status='failed' OR failures.records_failed>0) AND failures.started_at>=datetime('now','-24 hours')) failures_24h,
       (SELECT COUNT(*) FROM source_runs bh WHERE bh.source_id=s.id AND bh.bound_hit=1 AND bh.started_at>=datetime('now','-24 hours')) bound_hits_24h
       FROM sources s LEFT JOIN source_runs r ON r.id=(SELECT r2.id FROM source_runs r2 WHERE r2.source_id=s.id ORDER BY r2.started_at DESC LIMIT 1)
@@ -57,7 +57,7 @@ export async function captureOperationalMonitor(db: D1Database, now = new Date()
   if (generatedAt && latestIngestionSuccess && new Date(latestIngestionSuccess) > new Date(generatedAt)) alerts.push({ code: "projection_behind_ingestion", severity: "critical", message: "A source committed data after the current projection was generated." });
   for (const source of sourceRows) {
     if (!source.lastSuccess || now.getTime() - new Date(source.lastSuccess).getTime() > OPERATIONAL_THRESHOLDS.sourceStaleHours * 3_600_000) alerts.push({ code: "source_stale", severity: "critical", sourceId: source.sourceId, message: `${source.sourceId} has no successful ingestion within ${OPERATIONAL_THRESHOLDS.sourceStaleHours} hours.` });
-    if (source.lastFailure && (!source.lastSuccess || new Date(source.lastFailure) > new Date(source.lastSuccess))) alerts.push({ code: "source_latest_attempt_failed", severity: "critical", sourceId: source.sourceId, message: `${source.sourceId} has a failure newer than its last success.` });
+    if (source.result === "failed" || source.failed > 0) alerts.push({ code: "source_latest_attempt_failed", severity: "critical", sourceId: source.sourceId, message: `${source.sourceId}'s latest ingestion attempt failed.` });
     if (source.failures24h >= OPERATIONAL_THRESHOLDS.repeatedFailures24h) alerts.push({ code: "source_repeated_failures", severity: "critical", sourceId: source.sourceId, message: `${source.sourceId} failed ${source.failures24h} times in 24 hours.` });
     if (source.boundHits24h >= OPERATIONAL_THRESHOLDS.repeatedBoundHits24h) alerts.push({ code: "source_repeated_bound_hits", severity: "warning", sourceId: source.sourceId, message: `${source.sourceId} reached its configured batch bound ${source.boundHits24h} times in 24 hours.` });
   }
