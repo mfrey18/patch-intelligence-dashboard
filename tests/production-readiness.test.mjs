@@ -5,7 +5,7 @@ import test from "node:test";
 import "./helpers/register-typescript.mjs";
 
 const policy = await import("../lib/ingestion/operational-policy.ts");
-const { advanceCheckpoint, loadOrCreateCheckpoint, normalizeIngestionRequest } = await import("../lib/ingestion/orchestration.ts");
+const { advanceCheckpoint, checkpointBatchKey, loadOrCreateCheckpoint, normalizeIngestionRequest } = await import("../lib/ingestion/orchestration.ts");
 const { runVendorAdapter } = await import("../lib/ingestion/pipeline.ts");
 const { calculatePriority } = await import("../lib/domain/priority.ts");
 const { assertCveProvenance } = await import("../lib/api/provenance.ts");
@@ -230,6 +230,9 @@ test("a newly named deterministic replay reopens the canonical completed range",
   const replay = await loadOrCreateCheckpoint(db, "microsoft-msrc-csaf", { checkpointId: "deploy-replay", mode: "replay", since: stored.coverage_start, until: stored.coverage_end }, new Date("2026-08-26T12:00:00Z"));
   assert.equal(replay.id, "prior-replay");
   assert.equal(replay.status, "pending");
+  assert.equal(checkpointBatchKey(replay), "prior-replay:2026-08-11T00:00:00.000Z:start");
+  assert.equal(checkpointBatchKey(replay, "deploy-replay"), "prior-replay:generation:deploy-replay:2026-08-11T00:00:00.000Z:start");
+  assert.equal(checkpointBatchKey(replay, "deploy-replay"), checkpointBatchKey(replay, "deploy-replay"), "the same replay generation remains idempotent when resumed");
   assert.match(writes[0].sql, /ON CONFLICT DO NOTHING/);
   assert.match(writes.at(-1).sql, /status='pending'.*completed_at=NULL/);
 });

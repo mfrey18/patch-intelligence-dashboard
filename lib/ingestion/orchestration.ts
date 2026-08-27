@@ -104,8 +104,16 @@ export async function advanceCheckpoint(db: D1Database, checkpoint: IngestionChe
   return { ...checkpoint, windowStart: nextStart.toISOString(), windowEnd: nextEnd.toISOString(), continuation: null, status: "pending" };
 }
 
-export function checkpointBatchKey(checkpoint: IngestionCheckpoint): string {
-  return `${checkpoint.id}:${checkpoint.windowStart}:${checkpoint.continuation ?? "start"}`;
+export function checkpointBatchKey(checkpoint: IngestionCheckpoint, requestedCheckpointId?: string): string {
+  // D1 keeps one canonical checkpoint for a source/mode/range. A newly named
+  // deterministic replay can therefore reopen that canonical row, but it must
+  // not reuse the prior replay's successful source_runs. Scope only that case
+  // to the caller's validated checkpoint identifier; normal resumptions retain
+  // their existing idempotency keys.
+  const replayGeneration = requestedCheckpointId && requestedCheckpointId !== checkpoint.id
+    ? `:generation:${requestedCheckpointId}`
+    : "";
+  return `${checkpoint.id}${replayGeneration}:${checkpoint.windowStart}:${checkpoint.continuation ?? "start"}`;
 }
 
 function checkpointIdentity(sourceId: string, mode: IngestionMode, start: Date, end: Date): string {

@@ -127,7 +127,7 @@ async function handleIngestion(request: Request, env: Env): Promise<Response> {
       checkpoint = await loadOrCreateCheckpoint(env.DB, sourceId, body);
       if (checkpoint.status === "complete") return privateJson({ completedAt: new Date().toISOString(), status: "success", results: [{ sourceId, status: "unchanged", checkpoint }] });
       await markCheckpointRunning(env.DB, checkpoint.id);
-      const key = body.idempotencyKey ?? checkpointBatchKey(checkpoint);
+      const key = body.idempotencyKey ?? checkpointBatchKey(checkpoint, body.checkpointId);
       const result = await runVendorAdapter(adapter, new D1IngestionRepository(env.DB), {
         since: checkpoint.windowStart, until: checkpoint.windowEnd, idempotencyKey: key,
         mode: checkpoint.mode, continuation: checkpoint.continuation ?? undefined,
