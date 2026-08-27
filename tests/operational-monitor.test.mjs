@@ -60,13 +60,15 @@ test("retention cleanup of an abandoned historical run does not replace a succes
   assert.ok(!result.alerts.some((alert) => alert.code === "source_latest_attempt_failed"));
 });
 
-test("batch pressure alerts exclude intentionally bounded replay and backfill work", async () => {
+test("batch pressure alerts target unresolved operational checkpoints", async () => {
   let sourceQuery = "";
   const db = monitorDb();
   const originalPrepare = db.prepare.bind(db);
   db.prepare = (sql) => { if (/FROM sources s/.test(sql)) sourceQuery = sql; return originalPrepare(sql); };
   await captureOperationalMonitor(db, new Date("2026-08-26T12:00:00.000Z"), async () => 200);
   assert.match(sourceQuery, /bh\.ingestion_mode IN \('delta','patch_tuesday'\)/);
+  assert.match(sourceQuery, /cp\.status IN \('pending','running','failed'\)/);
+  assert.match(sourceQuery, /JOIN ingestion_checkpoints cp ON cp\.id=bh\.checkpoint_id/);
 });
 
 test("operational thresholds and daily monitoring workflow are explicit", () => {

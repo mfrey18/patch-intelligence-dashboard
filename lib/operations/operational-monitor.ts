@@ -36,7 +36,7 @@ export async function captureOperationalMonitor(db: D1Database, now = new Date()
       (SELECT completed_at FROM source_runs ok WHERE ok.source_id=s.id AND (ok.status IN ('success','unchanged') OR (ok.status='partial' AND ok.records_failed=0)) ORDER BY ok.completed_at DESC LIMIT 1) last_success,
       (SELECT started_at FROM source_runs bad WHERE bad.source_id=s.id AND (bad.status='failed' OR bad.records_failed>0) ORDER BY bad.started_at DESC LIMIT 1) last_failure,
       (SELECT COUNT(*) FROM source_runs failures WHERE failures.source_id=s.id AND (failures.status='failed' OR failures.records_failed>0) AND failures.started_at>=datetime('now','-24 hours')) failures_24h,
-      (SELECT COUNT(*) FROM source_runs bh WHERE bh.source_id=s.id AND bh.bound_hit=1 AND bh.ingestion_mode IN ('delta','patch_tuesday') AND bh.started_at>=datetime('now','-24 hours')) bound_hits_24h
+      (SELECT COUNT(*) FROM source_runs bh JOIN ingestion_checkpoints cp ON cp.id=bh.checkpoint_id WHERE bh.source_id=s.id AND bh.bound_hit=1 AND bh.ingestion_mode IN ('delta','patch_tuesday') AND cp.status IN ('pending','running','failed') AND bh.started_at>=datetime('now','-24 hours')) bound_hits_24h
       FROM sources s LEFT JOIN source_runs r ON r.id=(SELECT r2.id FROM source_runs r2 WHERE r2.source_id=s.id ORDER BY r2.started_at DESC LIMIT 1)
       WHERE s.id IN (${placeholders}) ORDER BY s.id`).bind(...PRODUCTION_SOURCE_IDS).all<Record<string, unknown>>(),
     db.prepare("SELECT source_id,acquired_at,expires_at FROM ingestion_leases").all<{ source_id: string; acquired_at: string; expires_at: string }>(),
