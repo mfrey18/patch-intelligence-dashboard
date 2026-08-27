@@ -10,7 +10,7 @@ import {
   textStream,
 } from "./fixtures/vendor-payloads.mjs";
 
-const { normalizeMicrosoftCvrf, normalizeMicrosoftReleaseNote } = await import(
+const { normalizeMicrosoftCvrf, normalizeMicrosoftReleaseMembership, normalizeMicrosoftReleaseNote } = await import(
   "../lib/ingestion/adapters/microsoft.ts"
 );
 
@@ -49,6 +49,28 @@ test("Microsoft release notes fail closed when the authoritative count is absent
     ref: { id: "release-note:2026-Aug", url: "https://api.msrc.microsoft.com/sug/v2.0/en-US/releaseNote/2026-Aug", metadata: { documentType: "release-note", releaseNumber: "2026-Aug" } },
     contentType: "application/json", body: { releaseNumber: "2026-Aug", releaseDate: "2026-08-11T10:00:00-04:00", title: "August 2026 Security Updates", description: "No count present" }, fetchedAt: observedAt, resolvedUrl: "https://api.msrc.microsoft.com/sug/v2.0/en-US/releaseNote/2026-Aug",
   }, sanitize), /authoritative Microsoft CVE count/);
+});
+
+test("Microsoft release membership links only Microsoft-CNA CVEs published through the event date", () => {
+  const raw = {
+    ref: { id: "release-membership:2026-Aug", url: "https://api.msrc.microsoft.com/sug/v2.0/en-US/vulnerability", metadata: { documentType: "release-membership", releaseNumber: "2026-Aug", eventDate: "2026-08-11" } },
+    contentType: "application/json",
+    body: { value: [
+      { cveNumber: "CVE-2026-10001", releaseNumber: "2026-Aug", issuingCna: "Microsoft", releaseDate: "2026-08-06T12:00:00-04:00" },
+      { cveNumber: "CVE-2026-10002", releaseNumber: "2026-Aug", issuingCna: "Microsoft", releaseDate: "2026-08-11T10:00:00-04:00" },
+      { cveNumber: "CVE-2026-10002", releaseNumber: "2026-Aug", issuingCna: "Microsoft", releaseDate: "2026-08-11T10:00:00-04:00" },
+      { cveNumber: "CVE-2026-10003", releaseNumber: "2026-Aug", issuingCna: "Linux", releaseDate: "2026-08-11T10:00:00-04:00" },
+      { cveNumber: "CVE-2026-10004", releaseNumber: "2026-Aug", issuingCna: "Microsoft", releaseDate: "2026-08-14T10:00:00-04:00" },
+    ] },
+    fetchedAt: observedAt,
+    resolvedUrl: "https://api.msrc.microsoft.com/sug/v2.0/en-US/vulnerability",
+  };
+  const advisory = normalizeMicrosoftReleaseMembership(raw, sanitize)[0];
+  assert.equal(advisory.vendorAdvisoryId, "release-membership:2026-Aug");
+  assert.deepEqual(advisory.cves.map((item) => item.cveId), ["CVE-2026-10001", "CVE-2026-10002"]);
+  assert.ok(advisory.cves.every((item) => item.normalizedSeverity === "unknown"));
+  assert.equal(advisory.releaseEvent.id, "microsoft-patch-tuesday-2026-08");
+  assert.equal(advisory.sourceUrl, "https://msrc.microsoft.com/update-guide/releaseNote/2026-Aug");
 });
 const { normalizeCiscoCsaf } = await import(
   "../lib/ingestion/adapters/cisco.ts"

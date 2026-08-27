@@ -23,6 +23,8 @@ CISA KEV synchronized 1,676 catalog entries with no failed records. FIRST EPSS p
 
 The initial August Patch Tuesday validation exposed 422 Microsoft-reported CVEs but 669 linked records. The excess was exactly 247 Microsoft VEX ecosystem records incorrectly associated by publication date. Patch Tuesday membership now excludes VEX documents, legacy links are removed, and the canonical event URL is restored to Microsoft's release note. The release note's product-family table is stored as vendor-reported analytics; linked product assertions remain separately available and drive severity and threat counts.
 
+Follow-up reconciliation found that the August release's 422 Microsoft CVEs comprise 20 Microsoft-CNA records released on August 6 plus 402 released on August 11. Date-only second-Tuesday association therefore omitted valid release membership. Microsoft ingestion now fetches one bounded SUG OData membership document per release, retains only Microsoft-CNA records assigned to that release and published through the event date, and links those CVEs without inferring severity, exploitation, or remediation. CSAF advisories continue to supply the detailed vendor assertions.
+
 Only the six validated production sources are marked enabled for freshness monitoring. Registered adapters in later expansion groups stay hidden from production-health expectations until deliberately promoted.
 
 ## Expansion gate

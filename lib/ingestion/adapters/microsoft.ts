@@ -35,7 +35,11 @@ export const microsoftAdapter: VendorAdapter = {
     const response = await fetchWithPolicy(ref.url, ctx.policy);
     return { ref, contentType: response.headers.get("content-type") ?? "application/json", body: await readJsonLimited(response, ctx.policy.maxResponseBytes), fetchedAt: new Date().toISOString(), resolvedUrl: response.url, etag: response.headers.get("etag") ?? undefined, lastModified: response.headers.get("last-modified") ?? undefined };
   },
-  async normalize(raw, ctx) { return raw.ref.metadata?.documentType === "release-note" ? normalizeMicrosoftReleaseNote(raw, ctx.sanitizeText) : normalizeMicrosoftCsaf(raw, ctx.observedAt, ctx.sanitizeText); },
+  async normalize(raw, ctx) {
+    if (raw.ref.metadata?.documentType === "release-note") return normalizeMicrosoftReleaseNote(raw, ctx.sanitizeText);
+    if (raw.ref.metadata?.documentType === "release-membership") return normalizeMicrosoftReleaseMembership(raw, ctx.sanitizeText);
+    return normalizeMicrosoftCsaf(raw, ctx.observedAt, ctx.sanitizeText);
+  },
 };
 
 export function normalizeMicrosoftReleaseNote(raw: RawAdvisory, sanitize: (value: unknown) => string | undefined): NormalizedAdvisory[] {
@@ -84,6 +88,34 @@ function isSecondTuesday(value: string): boolean {
   return date.getUTCDay() === 2 && date.getUTCDate() >= 8 && date.getUTCDate() <= 14;
 }
 
+export function normalizeMicrosoftReleaseMembership(raw: RawAdvisory, sanitize: (value: unknown) => string | undefined): NormalizedAdvisory[] {
+  const releaseNumber = raw.ref.metadata?.releaseNumber;
+  const eventDate = raw.ref.metadata?.eventDate;
+  const body = raw.body && typeof raw.body === "object" ? raw.body as Record<string, unknown> : {};
+  if (!releaseNumber || !/^\d{4}-[A-Z][a-z]{2}$/.test(releaseNumber)) throw new Error("Microsoft release membership is missing a valid release number");
+  if (!eventDate || Number.isNaN(new Date(`${eventDate}T23:59:59.999Z`).getTime())) throw new Error(`Microsoft release membership ${releaseNumber} is missing a valid event date`);
+  if (!Array.isArray(body.value)) throw new Error(`Microsoft release membership ${releaseNumber} is missing its vulnerability collection`);
+  const eventCutoff = new Date(`${eventDate}T23:59:59.999Z`).getTime();
+  const cves = uniqueBy(body.value.flatMap((entry) => {
+    if (!entry || typeof entry !== "object") return [];
+    const item = entry as Record<string, unknown>;
+    const cveId = typeof item.cveNumber === "string" ? item.cveNumber.toUpperCase() : "";
+    const publishedAt = typeof item.releaseDate === "string" ? new Date(item.releaseDate) : null;
+    if (!/^CVE-\d{4}-\d{4,}$/.test(cveId) || item.releaseNumber !== releaseNumber || item.issuingCna !== "Microsoft" || !publishedAt || Number.isNaN(publishedAt.getTime()) || publishedAt.getTime() > eventCutoff) return [];
+    return [{ cveId, description: sanitize(item.description), normalizedSeverity: "unknown" as const, publishedAt: publishedAt.toISOString() }];
+  }), (item) => item.cveId);
+  if (!cves.length) throw new Error(`Microsoft release membership ${releaseNumber} contains no authoritative Microsoft CVEs through ${eventDate}`);
+  const sourceUrl = `https://msrc.microsoft.com/update-guide/releaseNote/${releaseNumber}`;
+  const publishedAt = `${eventDate}T00:00:00.000Z`;
+  return [{
+    vendor: "microsoft", sourceId: "microsoft-msrc-csaf", vendorAdvisoryId: `release-membership:${releaseNumber}`,
+    title: `${releaseNumber} authoritative Microsoft CVE membership`, summary: `${cves.length} Microsoft-issued CVEs linked to ${releaseNumber} through ${eventDate}.`, sourceUrl,
+    publishedAt, sourceUpdatedAt: publishedAt, exploitationStatus: "unknown", zeroDayStatus: "unknown",
+    cves, affectedProducts: [], remediations: [], exploitEvidence: [],
+    releaseEvent: { id: `microsoft-patch-tuesday-${eventDate.slice(0, 7)}`, eventType: "patch_tuesday", eventDate, label: `${new Intl.DateTimeFormat("en", { month: "long", year: "numeric", timeZone: "UTC" }).format(new Date(publishedAt))} Patch Tuesday`, sourceUrl },
+  }];
+}
+
 function parseReportedProductFamilies(description: string): Array<{ label: string; value: number }> {
   const releaseHeading = /This release consists of[\s\S]*?<\/h2>/i.exec(description);
   if (!releaseHeading) return [];
@@ -110,7 +142,15 @@ function releaseNoteRefs(since: Date, until: Date): AdvisoryRef[] {
     const event = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth(), eventDay));
     if (event < new Date(Date.UTC(since.getUTCFullYear(), since.getUTCMonth(), since.getUTCDate())) || event > until) continue;
     const releaseNumber = `${event.getUTCFullYear()}-${new Intl.DateTimeFormat("en", { month: "short", timeZone: "UTC" }).format(event)}`;
+    const eventDate = event.toISOString().slice(0, 10);
     refs.push({ id: `release-note:${releaseNumber}`, url: `${SUG_ROOT}/releaseNote/${releaseNumber}`, sourceUpdatedAt: event.toISOString(), metadata: { documentType: "release-note", releaseNumber } });
+    const filter = encodeURIComponent(`releaseNumber eq '${releaseNumber}' and issuingCna eq 'Microsoft'`);
+    refs.push({ id: `release-membership:${releaseNumber}`, url: `${SUG_ROOT}/vulnerability?$filter=${filter}&$top=1000`, sourceUpdatedAt: event.toISOString(), metadata: { documentType: "release-membership", releaseNumber, eventDate } });
   }
   return refs;
+}
+
+function uniqueBy<T>(values: T[], key: (value: T) => string): T[] {
+  const seen = new Set<string>();
+  return values.filter((value) => { const id = key(value); if (seen.has(id)) return false; seen.add(id); return true; });
 }

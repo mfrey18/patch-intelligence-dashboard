@@ -265,7 +265,7 @@ test("Patch Tuesday membership excludes Microsoft VEX records and preserves rele
   const migration = await readFile(new URL("../migrations/0007_patch_tuesday_authoritative_membership.sql", import.meta.url), "utf8");
   assert.match(microsoft, /mayAssociateRelease.*documentType === "advisory"/s);
   assert.match(repository, /source_url=CASE WHEN excluded\.reported_cve_count IS NOT NULL/);
-  assert.match(query, /vendor_advisory_id LIKE 'advisory:%'/);
+  assert.match(query, /vendor_advisory_id LIKE 'advisory:%'[\s\S]*vendor_advisory_id LIKE 'release-membership:%'/);
   assert.match(migration, /vendor_advisory_id` LIKE 'vex:%'/);
   assert.match(migration, /vendor_advisory_id` LIKE 'release-note:%'/);
   assert.match(migration, /UPDATE `sources`[\s\S]*'mozilla-mfsa-yaml'[\s\S]*THEN 1 ELSE 0 END/);

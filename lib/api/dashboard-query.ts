@@ -424,7 +424,7 @@ export async function queryPatchTuesdayEvents(db: D1Database, limit = 12): Promi
       COUNT(DISTINCT CASE WHEN EXISTS(SELECT 1 FROM kev_entries k WHERE k.cve_id=ac.cve_id AND k.active=1) THEN ac.cve_id END) kev
       FROM release_event_advisories rea JOIN advisories a ON a.id=rea.advisory_id
       JOIN advisory_cves ac ON ac.advisory_id=rea.advisory_id
-      WHERE rea.release_event_id IN (${placeholders}) AND a.vendor_advisory_id LIKE 'advisory:%'
+      WHERE rea.release_event_id IN (${placeholders}) AND (a.vendor_advisory_id LIKE 'advisory:%' OR a.vendor_advisory_id LIKE 'release-membership:%')
       GROUP BY rea.release_event_id`).bind(...ids).all<Record<string, unknown>>(),
     db.prepare(`SELECT rea.release_event_id,COALESCE(p.family,p.name) label,COUNT(DISTINCT ac.cve_id) value
       FROM release_event_advisories rea JOIN advisories a ON a.id=rea.advisory_id
