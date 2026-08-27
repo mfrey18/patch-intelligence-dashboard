@@ -9,6 +9,7 @@ const { advanceCheckpoint, checkpointBatchKey, loadOrCreateCheckpoint, normalize
 const { runVendorAdapter } = await import("../lib/ingestion/pipeline.ts");
 const { calculatePriority } = await import("../lib/domain/priority.ts");
 const { assertCveProvenance } = await import("../lib/api/provenance.ts");
+const { normalizeRemediationRows } = await import("../lib/api/cve-query.ts");
 
 test("rolling scope and Free-plan batch policy are centralized and calendar-safe", () => {
   assert.equal(policy.INTELLIGENCE_WINDOW_MONTHS, 6);
@@ -246,6 +247,15 @@ test("CVE detail exposes component-level advisory revision comparison with prove
   assert.match(detail, /Advisory Revision Comparison/);
   assert.match(detail, /Affected products/);
   assert.match(detail, /Remediation/);
+});
+
+test("CVE detail groups identical remediation assertions while preserving product scope", () => {
+  const base = { advisory_id: "cisco:advisory", source_id: "cisco-psirt-csaf", observed_at: "2026-08-27T00:00:00Z", vendor: "Cisco", kind: "patch", patch_available: 1, fixed_version: null, action: "Install the vendor update.", reboot_required: null, superseded: null, source_url: "https://software.cisco.com", published_at: null, updated_at: "2026-08-27T00:00:00Z" };
+  const grouped = normalizeRemediationRows([{ ...base, product: "Release 1.0" }, { ...base, product: "Release 1.1" }, { ...base, product: "Release 1.0" }, { ...base, product: "Release 2.0", action: "Apply the workaround." }]);
+  assert.equal(grouped.length, 2);
+  assert.deepEqual(grouped[0].products, ["Release 1.0", "Release 1.1"]);
+  assert.deepEqual(grouped[1].products, ["Release 2.0"]);
+  assert.equal(grouped[0].patchAvailable, true);
 });
 
 test("Patch Tuesday totals retain Microsoft release-note provenance separately from linked CVEs", async () => {
