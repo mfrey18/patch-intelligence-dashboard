@@ -21,7 +21,7 @@ test("production health allowlist contains only the six validated sources", () =
   ]);
 });
 
-test("default ingestion excludes credential-dependent sources until configured", () => {
+test("default ingestion is restricted to validated production sources", () => {
   const defaults = defaultSourceIds({});
   assert.ok(defaults.includes("microsoft-msrc-csaf"));
   assert.ok(defaults.includes("cisa-kev"));
@@ -40,5 +40,8 @@ test("default ingestion excludes credential-dependent sources until configured",
     APPLE_CSAF_URLS: '["https://support.apple.com/security/advisory.json"]',
     SAP_CSAF_URLS: "https://support.sap.com/security/advisory.json",
   });
-  assert.equal(configured.length, SOURCE_CATALOG.length);
+  assert.deepEqual(configured, [...PRODUCTION_SOURCE_IDS]);
+  for (const quarantined of ["adobe-psirt-csaf", "fortinet-psirt-csaf", "ivanti-security-advisory-rss", "apple-configured-csaf", "sap-configured-csaf"]) {
+    assert.ok(!configured.includes(quarantined), `${quarantined} must require explicit promotion to the production allowlist`);
+  }
 });

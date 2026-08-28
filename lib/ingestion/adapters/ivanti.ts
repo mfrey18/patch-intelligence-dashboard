@@ -57,7 +57,10 @@ export function normalizeIvantiRssItem(raw: RawAdvisory, _observedAt: string, sa
     if (known || explicitlyNotKnown) exploitEvidence.push({ cveId, type: "known_exploitation", status: known ? "confirmed" : "not_confirmed", evidenceDate, evidenceUrl: raw.resolvedUrl, summary: evidenceSentence(plain, /exploit/i) });
     if (zeroDay) exploitEvidence.push({ cveId, type: "zero_day", status: "confirmed", evidenceDate, evidenceUrl: raw.resolvedUrl, summary: evidenceSentence(plain, /zero[- ]day/i) });
   }
-  const remediations: NormalizedRemediation[] = (patchAvailable || hasRemediationDirection) ? [{
+  // The RSS feed frequently contains generic patch-program language without
+  // identifying the vulnerabilities to which it applies. Keep that language
+  // out of the remediation model unless the same authoritative item names a CVE.
+  const remediations: NormalizedRemediation[] = cveIds.length > 0 && (patchAvailable || hasRemediationDirection) ? [{
     kind: patchAvailable ? "patch" : "vendor_action",
     patchAvailable: patchAvailable ? true : undefined,
     action: patchAvailable ? "Apply the Ivanti security update described in the advisory." : "Follow the remediation instructions in the Ivanti security advisory.",

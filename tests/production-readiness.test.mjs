@@ -158,7 +158,7 @@ test("production workflows apply migrations before Worker deployment and seriali
   assert.match(ingestion, /\[ "\$result_status" = "failed" \] \|\| \[ "\$result_status" = "skipped" \]/, "active or stuck source leases must not be reported as successful completion");
   const dailyMatrix = ingestion.slice(ingestion.indexOf("matrix:"), ingestion.indexOf("name: Daily source"));
   for (const source of ["microsoft-msrc-csaf", "cisco-psirt-csaf", "cisa-kev", "first-epss", "palo-alto-psirt-csaf", "mozilla-mfsa-yaml"]) assert.match(dailyMatrix, new RegExp(source));
-  for (const quarantined of ["ivanti-security-advisory-rss", "oracle-cpu-csaf", "atlassian-vulnerability-api"]) assert.doesNotMatch(dailyMatrix, new RegExp(quarantined));
+  for (const quarantined of ["adobe-psirt-csaf", "fortinet-psirt-csaf", "ivanti-security-advisory-rss", "oracle-cpu-csaf", "atlassian-vulnerability-api"]) assert.doesNotMatch(dailyMatrix, new RegExp(quarantined));
   assert.doesNotMatch(ingestion, /sources:\s*\[[^\]]+,[^\]]+\]/, "each request must contain one source");
   assert.doesNotMatch(vite, /limits:\s*\{/, "Workers Free deployments must use platform limits rather than paid-plan runtime limits");
 });

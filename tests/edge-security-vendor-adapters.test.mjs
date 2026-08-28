@@ -89,6 +89,19 @@ test("Ivanti RSS emits patch and zero-day state only when explicitly stated", ()
   assert.deepEqual(advisory.exploitEvidence.map((item) => item.type), ["known_exploitation", "zero_day"]);
 });
 
+test("Ivanti generic patch-program copy cannot create remediation without an asserted CVE", () => {
+  const body = {
+    id: "monthly-update",
+    title: "Monthly Security Update",
+    link: "https://www.ivanti.com/blog/monthly-security-update",
+    description: "Ivanti releases standard security patches every month. See the linked notices for remediation details.",
+    publishedAt: "2026-08-20T12:00:00.000Z",
+  };
+  const advisory = normalizeIvantiRssItem({ ref: { id: body.id, url: body.link }, contentType: "application/rss+xml", body, fetchedAt: observedAt, resolvedUrl: body.link }, observedAt, sanitize);
+  assert.deepEqual(advisory.cves, []);
+  assert.deepEqual(advisory.remediations, []);
+});
+
 test("Adobe remains config-aware and only accepts official Adobe JSON/CSAF URLs", async () => {
   await assert.rejects(() => createAdobeAdapter().discover({ fetch, policy }), /ADOBE_SECURITY_INDEX_URL/);
   await assert.rejects(() => createAdobeAdapter({ indexUrl: "https://example.invalid/index.json" }).discover({ fetch, policy }), /official Adobe host/);

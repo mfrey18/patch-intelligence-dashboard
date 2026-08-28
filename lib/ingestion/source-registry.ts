@@ -10,7 +10,7 @@ import { oracleAdapter } from "./adapters/oracle";
 import { atlassianAdapter } from "./adapters/atlassian";
 import { createAppleAdapter } from "./adapters/apple";
 import { createSapAdapter } from "./adapters/sap";
-import { SOURCE_CATALOG, SOURCE_IDS } from "./source-catalog";
+import { PRODUCTION_SOURCE_IDS, SOURCE_CATALOG, SOURCE_IDS } from "./source-catalog";
 
 export interface AdapterEnvironment {
   CISCO_CLIENT_ID?: string;
@@ -28,7 +28,11 @@ export interface AdapterEnvironment {
 export { SOURCE_IDS };
 
 export function defaultSourceIds(env: AdapterEnvironment): string[] {
-  return SOURCE_CATALOG.filter((source) => !("requiresConfiguration" in source) || !source.requiresConfiguration || isConfigured(source.id, env)).map((source) => source.id);
+  return PRODUCTION_SOURCE_IDS
+    .map((sourceId) => SOURCE_CATALOG.find((source) => source.id === sourceId))
+    .filter((source) => source != null)
+    .filter((source) => !("requiresConfiguration" in source) || !source.requiresConfiguration || isConfigured(source.id, env))
+    .map((source) => source.id);
 }
 
 export function createVendorAdapter(sourceId: string, env: AdapterEnvironment): VendorAdapter | null {

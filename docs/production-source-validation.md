@@ -30,3 +30,15 @@ Only the six validated production sources are marked enabled for freshness monit
 ## Expansion gate
 
 Adobe, Fortinet, and Ivanti remain outside the production source list until each passes the same fixtures, bounded replay, real-output review, provenance acceptance, and partial-failure checks. Adobe and Fortinet stay fail-closed without configured authoritative structured exports. VMware/Broadcom, Citrix, Chrome, Apple, Oracle, Atlassian, and SAP remain later groups; the existence of parser code alone is not production approval.
+
+## August 27, 2026 expansion-source validation
+
+No source in this group was promoted. The shared fixtures pass, but a parser fixture is only one part of the production gate; the live authoritative distribution must also provide complete, repeatable input to the same contract.
+
+| Source | Live authoritative result | Production decision |
+| --- | --- | --- |
+| Adobe PSIRT | The public security bulletin index is HTML and exposes no verified JSON/CSAF discovery feed. Supplying that page to the JSON adapter is rejected, and the standard CSAF provider-metadata locations return 404. | **Quarantined / fail closed.** Enable only after Adobe supplies a verified official structured index, configured through `ADOBE_SECURITY_INDEX_URL`. |
+| Fortinet PSIRT | The official RSS feed is reachable and returned 44 advisories in the rolling window. The advisory site advertises CSAF downloads, but automated access is challenge-protected; no verified direct export template or CSAF provider metadata was available. A guessed official-host template returned 404 and is not accepted as production configuration. | **Quarantined / fail closed.** Enable only after a direct official CSAF URL template or authenticated export is obtained and a bounded replay succeeds. |
+| Ivanti | The official RSS feed returned eight security-update posts in the rolling window. Only one post named a CVE, none supplied structured affected-product assertions, and generic monthly patch language appeared independently of CVE-level detail. | **Quarantined / incomplete.** Do not promote the RSS-only adapter until an authoritative advisory source supplies dependable CVE, product, and remediation mappings. |
+
+The default-source resolver is restricted to `PRODUCTION_SOURCE_IDS`, so credentials or adapter registration alone cannot silently promote a quarantined source. Ivanti normalization also refuses to create remediation rows from generic RSS patch language when the item asserts no CVE.
