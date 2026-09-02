@@ -19,6 +19,11 @@ test("server-renders the vulnerability intelligence dashboard without fabricated
   assert.match(html, /Total Vulnerabilities/);
   assert.match(html, /Since last refresh/);
   assert.match(html, /Coverage &amp; Freshness/);
+  assert.match(html, /href="#\/patch-tuesday">Microsoft Patch Tuesday<\/a>/);
+  assert.doesNotMatch(html, /href="#\/patch-tuesday">Patch Tuesday<\/a>/);
+  assert.match(html, /Changed Since Yesterday/);
+  assert.match(html, /href="#\/operations">Source Health<\/a>/);
+  assert.doesNotMatch(html, /Operational queues|Act on what changed|Needs action now|Patch newly available|Patch Tuesday archive/);
   assert.doesNotMatch(html, /What needs attention now|Operational triage|Priority queue|>PI</);
   assert.doesNotMatch(html, /CVE-2026-\d{4,}/);
 });

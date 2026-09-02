@@ -87,10 +87,10 @@ export function DashboardClient({ initialData, apiBaseUrl = "", cvePathPrefix = 
     void load(search);
   };
 
-  const applyOperationalView = (view: "needs-action" | "patch-new" | "changed") => {
+  const applyChangedView = () => {
     const params = new URLSearchParams(window.location.search);
     for (const key of ["priority", "exploited", "patchAvailable", "cursor", "view"]) params.delete(key);
-    params.set("view", view);
+    params.set("view", "changed");
     const search = `?${params}`;
     window.history.pushState({}, "", `${window.location.pathname}${search}${window.location.hash}`);
     void load(search);
@@ -106,7 +106,7 @@ export function DashboardClient({ initialData, apiBaseUrl = "", cvePathPrefix = 
     <main className="shell">
       <header className="topbar">
         <a className="brand" href="#top"><span className="brandMark">VI</span><span><strong>Vulnerability Intelligence</strong><small>Cross-vendor vulnerability and threat intelligence</small></span></a>
-        <nav aria-label="Primary navigation"><a className="active" href="#overview">Overview</a><a href="#threats">Threats</a><a href="#vulnerabilities">Vulnerabilities</a><a href="#/patch-tuesday">Patch Tuesday</a><a href="#/operations">Sources</a></nav>
+        <nav aria-label="Primary navigation"><a className="active" href="#overview">Overview</a><a href="#threats">Threats</a><a href="#vulnerabilities">Vulnerabilities</a><a href="#/patch-tuesday">Microsoft Patch Tuesday</a><a href="#/operations">Sources</a></nav>
         <div className="health"><i className={sourceHealthy < data.sourceHealth.length ? "warn" : ""} /><span><strong>{sourceHealthy}/{data.sourceHealth.length || 4} sources fresh</strong><small>{data.demo ? "Representative preview data" : `Updated ${timeAgo(data.generatedAt)}`}</small></span></div>
       </header>
 
@@ -123,7 +123,10 @@ export function DashboardClient({ initialData, apiBaseUrl = "", cvePathPrefix = 
         <div className="heroTools"><p>Search the intelligence record</p><form className="search" onSubmit={(event) => { event.preventDefault(); setFilter("q", query); }}><span aria-hidden="true">⌕</span><input aria-label="Search CVE, vendor, or product" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="CVE, vendor, or product" /><button type="submit">Search</button></form><small>{loading ? "Refreshing intelligence…" : `${sourceHealthy}/${data.sourceHealth.length || 4} sources fresh · updated ${timeAgo(data.generatedAt)}`}</small></div>
       </section>
 
-      <section className="operationalViews" aria-label="Operational intelligence views"><span><small>Operational queues</small><strong>Act on what changed</strong></span><button type="button" aria-pressed={filters.view === "needs-action"} onClick={() => applyOperationalView("needs-action")}>Needs action now <b>{data.priorityDistribution.P1}</b></button><button type="button" aria-pressed={filters.view === "patch-new"} onClick={() => applyOperationalView("patch-new")}>Patch newly available <b>{data.changes.newRemediation}</b></button><button type="button" aria-pressed={filters.view === "changed"} onClick={() => applyOperationalView("changed")}>Changed since yesterday <b>{data.recentChanges.length}</b></button><a href="#/patch-tuesday">Patch Tuesday archive →</a><a href="#/operations">Source health →</a></section>
+      <section className="quickActions" aria-label="Dashboard quick actions">
+        <button type="button" aria-pressed={filters.view === "changed"} aria-busy={loading} disabled={loading} onClick={applyChangedView}>Changed Since Yesterday <b>{data.recentChanges.length}</b></button>
+        <a href="#/operations">Source Health</a>
+      </section>
 
       {error && <div className="notice" role="status">{error}</div>}
       <section className="summary" id="overview" aria-busy={loading}>
