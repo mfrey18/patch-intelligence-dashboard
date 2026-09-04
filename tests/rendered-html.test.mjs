@@ -20,21 +20,20 @@ test("server-renders the vulnerability intelligence dashboard without fabricated
   assert.match(html, /Since last refresh/);
   assert.match(html, /Coverage &amp; Freshness/);
   assert.match(html, /href="#\/patch-tuesday">Microsoft Patch Tuesday<\/a>/);
-  assert.doesNotMatch(html, /href="#\/patch-tuesday">Patch Tuesday<\/a>/);
   assert.match(html, /Changed Since Yesterday/);
-  assert.match(html, /href="#\/operations">Source Health<\/a>/);
-  assert.doesNotMatch(html, /Operational queues|Act on what changed|Needs action now|Patch newly available|Patch Tuesday archive/);
+  assert.match(html, /href="#\/operations">Sources<\/a>/);
+  assert.match(html, /class="quickActions"/);
   assert.doesNotMatch(html, /What needs attention now|Operational triage|Priority queue|>PI</);
   assert.doesNotMatch(html, /CVE-2026-\d{4,}/);
 });
 
-test("public API fallback is read-only and internal ingestion is never cacheable", async () => {
+test("public API failures and internal ingestion fail closed without cacheable demo data", async () => {
   const dashboard = await worker.fetch(new Request("http://localhost/api/dashboard"), environment, context);
-  assert.equal(dashboard.status, 200);
-  assert.match(dashboard.headers.get("cache-control") ?? "", /public/);
+  assert.equal(dashboard.status, 503);
+  assert.equal(dashboard.headers.get("cache-control"), "no-store");
   const body = await dashboard.json();
-  assert.equal(body.demo, true);
-  assert.equal(body.metrics.total, 0);
+  assert.equal(body.error, "Dashboard intelligence is temporarily unavailable");
+  assert.equal(body.demo, undefined);
 
   const ingest = await worker.fetch(new Request("http://localhost/api/internal/ingest", { method: "POST", body: "{}", headers: { "content-type": "application/json" } }), environment, context);
   assert.equal(ingest.status, 503);
