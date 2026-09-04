@@ -16,7 +16,31 @@ The authenticated `GET /api/internal/health` endpoint captures:
 
 Cloudflare D1 rejects `PRAGMA page_count` and `PRAGMA page_size` through a Worker binding. The ordered deployment workflow therefore obtains current database bytes from the supported `wrangler d1 info --json` management command, enriches the authenticated health response with that value, and archives the combined JSON as a 30-day GitHub Actions artifact. Runtime health returns `databaseBytes: null` and `databaseSizeSource: "wrangler_d1_info_required"` so an unavailable value cannot be mistaken for a measured zero.
 
-Projections retain only a rolling six months of EPSS observations while projecting advisory/revision/change/run audit growth linearly from observed activity. In the archived deployment artifact, whole-database average bytes per measured major-table row makes the byte figures directional rather than a storage guarantee.
+Projections retain daily EPSS observations for 42 days and one published observation per week for the older portion of the rolling six-month window while projecting advisory/revision/change/run audit growth linearly from observed activity. In the archived deployment artifact, whole-database average bytes per measured major-table row makes the byte figures directional rather than a storage guarantee.
+
+## Current production snapshot
+
+Capture date: 2026-09-02. The production database is 326,074,368 bytes (311.0 MiB), or 65.2% of the 500 MB Free-plan per-database limit. It contains 26 tables and 49 named indexes. A low-read inventory query completed in 4.03 ms and read 6,680 rows. High-water marks are used for large append-oriented tables to avoid an expensive full count; they are close to, but not guaranteed to equal, live row counts after deletions.
+
+| Table | Row/high-water value |
+| --- | ---: |
+| affected_products | 166,827 |
+| remediations | 120,319 |
+| intelligence_changes | 23,084 |
+| source_run_results | 12,053 |
+| products | 11,400 |
+| cves | 10,810 |
+| advisory_cves | 9,841 |
+| advisory_revisions | 8,468 |
+| advisories | 8,041 |
+| cve_dashboard_facts (exact) | 6,547 |
+| exploit_evidence | 3,513 |
+| kev_entries | 1,687 |
+| source_runs | 1,447 |
+
+Eight published EPSS dataset days span 2026-08-20 through 2026-09-01 and report 67,386 matched observations in total. Before this optimization, D1 reported 11,171,731 rows read and 137,619 rows written in its rolling 24-hour management view. The Worker log confirmed the public API was temporarily blocked by the Free-plan daily row-read ceiling; the D1 binding itself was correct. The remediation implemented here removes expensive fallback amplification, pre-aggregates affected products once during projection construction, uses a lean canonical parity query, scopes EPSS observations to the six-month dashboard universe, suppresses unchanged enrichment writes, and publishes projection differences instead of replacing every fact row.
+
+This snapshot is the pre-deployment measurement for the optimization. Re-capture it after the next UTC quota reset and one complete optimized ingestion/housekeeping cycle; the target is below 3.5 million rows read and 70,000 rows written per day, with warnings at 4 million and 80,000 respectively.
 
 ## Pre-migration production snapshot
 

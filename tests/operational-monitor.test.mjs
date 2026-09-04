@@ -76,6 +76,10 @@ test("operational thresholds and daily monitoring workflow are explicit", () => 
   const workflow = readFileSync(new URL("../.github/workflows/operations-monitor.yml", import.meta.url), "utf8");
   assert.match(workflow, /api\/internal\/monitor/);
   assert.match(workflow, /databaseWarningBytes:400000000/);
+  assert.match(workflow, /rowsReadWarning24h:4000000/);
+  assert.match(workflow, /rowsWrittenWarning24h:80000/);
+  assert.match(workflow, /d1_rows_read_pressure/);
+  assert.match(workflow, /d1_rows_written_pressure/);
   assert.match(workflow, /status != "unhealthy"/);
   assert.match(workflow, /issues: write/);
   assert.match(workflow, /Publish or resolve production alert/);

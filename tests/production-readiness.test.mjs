@@ -299,3 +299,11 @@ test("gate documentation uses outcome-based release framing", async () => {
   assert.match(gate, /PASS requires evidence/);
   assert.match(gate, /FAIL.*until PR #5 is reviewed/s);
 });
+
+test("production dashboard failures remain fail closed and smoke tests reject demo data", async () => {
+  const worker = await readFile(new URL("../worker/index.ts", import.meta.url), "utf8");
+  const workflow = await readFile(new URL("../.github/workflows/cloudflare.yml", import.meta.url), "utf8");
+  assert.match(worker, /dashboard_query_error/);
+  assert.match(worker, /Dashboard intelligence is temporarily unavailable.*503/s);
+  assert.match(workflow, /\(\.demo \/\/ false\) == false and \.metrics\.total > 0/);
+});

@@ -1,6 +1,10 @@
 import type { IngestionMode } from "./contracts";
 
 export const INTELLIGENCE_WINDOW_MONTHS = 6;
+// Keep dense EPSS history where daily movement is operationally useful, then
+// retain one published point per week for the remainder of the six-month view.
+export const EPSS_DAILY_RETENTION_DAYS = 42;
+export const EPSS_WEEKLY_RETENTION_MONTHS = INTELLIGENCE_WINDOW_MONTHS;
 export const DELTA_LOOKBACK_DAYS = 3;
 export const BACKFILL_WINDOW_DAYS = 1;
 export const REPLAY_WINDOW_DAYS = 1;

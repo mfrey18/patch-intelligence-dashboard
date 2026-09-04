@@ -50,7 +50,7 @@ export class D1IngestionRepository implements IngestionRepository {
     }
 
     for (const assertion of advisory.cves) {
-      queries.push(this.db.prepare("INSERT INTO cves (id, created_at, updated_at) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET updated_at=excluded.updated_at").bind(assertion.cveId, now, now));
+      queries.push(this.db.prepare("INSERT OR IGNORE INTO cves (id, created_at, updated_at) VALUES (?, ?, ?)").bind(assertion.cveId, now, now));
       queries.push(this.db.prepare("INSERT INTO advisory_cves (advisory_id, cve_id, vendor_description, vendor_cwe, vendor_severity, normalized_severity, vendor_cvss_score, vendor_cvss_vector) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(advisory_id, cve_id) DO UPDATE SET vendor_description=excluded.vendor_description, vendor_cwe=excluded.vendor_cwe, vendor_severity=excluded.vendor_severity, normalized_severity=excluded.normalized_severity, vendor_cvss_score=excluded.vendor_cvss_score, vendor_cvss_vector=excluded.vendor_cvss_vector").bind(advisoryId, assertion.cveId, assertion.description ?? null, assertion.cwe ?? null, assertion.vendorSeverity ?? null, assertion.normalizedSeverity, assertion.cvssScore ?? null, assertion.cvssVector ?? null));
     }
 

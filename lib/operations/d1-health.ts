@@ -1,4 +1,4 @@
-import { INTELLIGENCE_WINDOW_MONTHS, rollingWindowStart } from "../ingestion/operational-policy";
+import { EPSS_DAILY_RETENTION_DAYS, INTELLIGENCE_WINDOW_MONTHS, rollingWindowStart } from "../ingestion/operational-policy";
 import { queryDashboard } from "../api/dashboard-query";
 
 const MAJOR_TABLES = [
@@ -53,7 +53,8 @@ export async function captureD1ProductionBaseline(db: D1Database): Promise<D1Pro
   const baselineMaturity = observedDays >= 7 ? "representative" : "startup";
   const auditRowsPerDay = baselineMaturity === "representative" ? auditRows / observedDays : STARTUP_AUDIT_ROWS_PER_DAY_ESTIMATE;
   const sixMonthDays = 183;
-  const fullWindowEpssRows = Math.round(epssPerDay * sixMonthDays);
+  const retainedEpssDays = EPSS_DAILY_RETENTION_DAYS + Math.ceil((sixMonthDays - EPSS_DAILY_RETENTION_DAYS) / 7);
+  const fullWindowEpssRows = Math.round(epssPerDay * retainedEpssDays);
   const stableRows = Math.max(0, totalRows - epssRows) + fullWindowEpssRows;
   const project = (additionalDays: number) => Math.round(stableRows + auditRowsPerDay * additionalDays);
   const projectionRows = [project(0), project(sixMonthDays), project(sixMonthDays * 2)];
@@ -70,20 +71,27 @@ export async function captureD1ProductionBaseline(db: D1Database): Promise<D1Pro
     queryLatencyMs,
     slowestImportantQuery: { name: sortedLatency[0]?.[0] ?? "none", durationMs: sortedLatency[0]?.[1] ?? 0 },
     projections: (["current", "plus_6_months", "plus_12_months"] as const).map((horizon, index) => ({ horizon, estimatedRows: projectionRows[index], estimatedBytes: null })),
-    projectionAssumptions: ["EPSS observations are retained for the rolling six-month window.", baselineMaturity === "representative" ? "Advisory and audit history is not destructively pruned; observed audit-row growth is projected linearly." : `Fewer than seven days of production runs are available; the startup projection assumes ${STARTUP_AUDIT_ROWS_PER_DAY_ESTIMATE} audit/run rows per day and must be refreshed after a representative week.`, "Cloudflare D1 does not authorize page-size PRAGMAs through a Worker binding; deployment enriches this health snapshot with the authoritative database_size from wrangler d1 info."],
+    projectionAssumptions: [`EPSS retains daily observations for ${EPSS_DAILY_RETENTION_DAYS} days and one published observation per week for the rest of the rolling six-month window.`, baselineMaturity === "representative" ? "Advisory and audit history is not destructively pruned; observed audit-row growth is projected linearly." : `Fewer than seven days of production runs are available; the startup projection assumes ${STARTUP_AUDIT_ROWS_PER_DAY_ESTIMATE} audit/run rows per day and must be refreshed after a representative week.`, "Cloudflare D1 does not authorize page-size PRAGMAs through a Worker binding; deployment enriches this health snapshot with the authoritative database_size from wrangler d1 info."],
     baselineMaturity,
   };
 }
 
-export async function pruneRollingRetention(db: D1Database, now = new Date()): Promise<{ cutoff: string; epssObservations: number; epssDatasets: number; completedCheckpoints: number; abandonedRuns: number; expiredLeases: number; preservedAuditHistory: true }> {
+export async function pruneRollingRetention(db: D1Database, now = new Date()): Promise<{ cutoff: string; dailyCutoff: string; epssObservations: number; epssDatasets: number; completedCheckpoints: number; abandonedRuns: number; expiredLeases: number; preservedAuditHistory: true }> {
   const cutoff = rollingWindowStart(now).toISOString().slice(0, 10);
+  const dailyCutoff = new Date(now.getTime() - EPSS_DAILY_RETENTION_DAYS * 86_400_000).toISOString().slice(0, 10);
   const checkpointCutoff = new Date(now.getTime() - 30 * 86_400_000).toISOString();
-  const observations = await db.prepare("DELETE FROM epss_observations WHERE score_date < ?").bind(cutoff).run();
-  const datasets = await db.prepare("DELETE FROM epss_datasets WHERE score_date < ? AND is_current=0 AND NOT EXISTS(SELECT 1 FROM epss_observations eo WHERE eo.score_date=epss_datasets.score_date)").bind(cutoff).run();
+  const expiredObservations = await db.prepare("DELETE FROM epss_observations WHERE score_date < ?").bind(cutoff).run();
+  const downsampledObservations = await db.prepare(`DELETE FROM epss_observations
+    WHERE score_date>=? AND score_date<? AND score_date NOT IN (
+      SELECT MAX(score_date) FROM epss_datasets
+      WHERE score_date>=? AND score_date<? AND status='published'
+      GROUP BY strftime('%Y-%W',score_date)
+    )`).bind(cutoff, dailyCutoff, cutoff, dailyCutoff).run();
+  const datasets = await db.prepare("DELETE FROM epss_datasets WHERE is_current=0 AND NOT EXISTS(SELECT 1 FROM epss_observations eo WHERE eo.score_date=epss_datasets.score_date)").run();
   const checkpoints = await db.prepare("DELETE FROM ingestion_checkpoints WHERE status='complete' AND completed_at < ?").bind(checkpointCutoff).run();
   const abandonedRuns = await db.prepare("UPDATE source_runs SET status='failed', completed_at=?, records_failed=MAX(records_failed,1), error_summary=COALESCE(error_summary,'Ingestion lease expired before the run completed') WHERE status='running' AND started_at < ?").bind(now.toISOString(), new Date(now.getTime() - 15 * 60_000).toISOString()).run();
   const leases = await db.prepare("DELETE FROM ingestion_leases WHERE expires_at < ?").bind(now.toISOString()).run();
-  return { cutoff, epssObservations: changes(observations), epssDatasets: changes(datasets), completedCheckpoints: changes(checkpoints), abandonedRuns: changes(abandonedRuns), expiredLeases: changes(leases), preservedAuditHistory: true };
+  return { cutoff, dailyCutoff, epssObservations: changes(expiredObservations) + changes(downsampledObservations), epssDatasets: changes(datasets), completedCheckpoints: changes(checkpoints), abandonedRuns: changes(abandonedRuns), expiredLeases: changes(leases), preservedAuditHistory: true };
 }
 
 async function timed(target: Record<string, number>, name: string, operation: () => Promise<unknown>): Promise<void> {

@@ -1,6 +1,7 @@
 import type { IngestResult } from "../contracts";
 import { D1IngestionRepository } from "../d1-repository";
 import { fetchWithPolicy } from "../safety";
+import { INTELLIGENCE_WINDOW_MONTHS } from "../operational-policy";
 
 export const EPSS_CURRENT_URL = "https://epss.empiricalsecurity.com/epss_scores-current.csv.gz";
 
@@ -57,7 +58,15 @@ export async function ingestEpssBulk(db: D1Database, idempotencyKey?: string, op
     const compressed = await response.arrayBuffer();
     if (compressed.byteLength > 50_000_000) throw new Error("EPSS compressed dataset exceeds configured size limit");
     const sourceHash = await sha256Bytes(compressed);
-    const trackedRows = await db.prepare("SELECT id FROM cves").all<{ id: string }>();
+    const trackedRows = await db.prepare(`SELECT DISTINCT c.id
+      FROM cves c
+      LEFT JOIN advisory_cves ac ON ac.cve_id=c.id
+      LEFT JOIN advisories a ON a.id=ac.advisory_id
+        AND COALESCE(a.published_at,a.source_updated_at)>=date('now','-${INTELLIGENCE_WINDOW_MONTHS} months')
+      WHERE a.id IS NOT NULL OR EXISTS(
+        SELECT 1 FROM kev_entries k WHERE k.cve_id=c.id AND k.active=1
+          AND date(k.date_added)>=date('now','-${INTELLIGENCE_WINDOW_MONTHS} months')
+      )`).all<{ id: string }>();
     const tracked = new Set((trackedRows.results ?? []).map((row) => row.id));
     let matched = 0;
     const trackedObservations: EpssRow[] = [];
@@ -69,8 +78,15 @@ export async function ingestEpssBulk(db: D1Database, idempotencyKey?: string, op
     const scoreDate = metadata.scoreDate.slice(0, 10);
     const minimumRows = options.minimumRows ?? (options.url ? 1 : 100_000);
     if (parsed.rowCount < minimumRows) throw new Error(`EPSS dataset has only ${parsed.rowCount} rows; refusing to publish an incomplete snapshot`);
-    const latest = await db.prepare("SELECT score_date FROM epss_datasets WHERE is_current=1 LIMIT 1").first<{ score_date: string }>();
+    const latest = await db.prepare("SELECT score_date,source_hash,status FROM epss_datasets WHERE is_current=1 LIMIT 1").first<{ score_date: string; source_hash: string; status: string }>();
     if (latest && scoreDate < latest.score_date) throw new Error("EPSS dataset date regressed");
+    if (latest?.score_date === scoreDate && latest.source_hash === sourceHash && latest.status === "published") {
+      counts.discovered = parsed.rowCount;
+      counts.unchanged = trackedObservations.length;
+      await db.prepare("UPDATE source_runs SET dataset_date=?, source_hash=? WHERE id=?").bind(scoreDate, sourceHash, runId).run();
+      await repository.finishRun(runId, { status: "unchanged", ...runFields, counts, errors: [] });
+      return { sourceId: "first-epss", runId, status: "unchanged", ...runFields, counts, errors: [], startedAt, completedAt: new Date().toISOString() };
+    }
 
     await db.prepare("INSERT INTO epss_datasets (score_date, source_run_id, model_version, source_hash, source_url, row_count, matched_cve_count, status, is_current, published_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'staging', 0, ?) ON CONFLICT(score_date) DO UPDATE SET source_run_id=excluded.source_run_id, model_version=excluded.model_version, source_hash=excluded.source_hash, source_url=excluded.source_url, row_count=excluded.row_count, matched_cve_count=excluded.matched_cve_count, status='staging', published_at=excluded.published_at").bind(scoreDate, runId, metadata.modelVersion ?? null, sourceHash, response.url, parsed.rowCount, matched, metadata.scoreDate).run();
     for (const row of trackedObservations) {

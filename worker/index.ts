@@ -177,8 +177,9 @@ async function dashboardResponse(request: Request, env: Env, ctx: ExecutionConte
     const response = json(value);
     if (cache && value !== demoDashboard) ctx.waitUntil(cache.put(cacheKey, response.clone()));
     return addCorsToResponse(response, request, env);
-  } catch {
-    return json({ ...demoDashboard, generatedAt: new Date().toISOString(), demo: true, warning: "The intelligence store is awaiting its first successful ingestion." }, 200, request, env);
+  } catch (error) {
+    console.error(JSON.stringify({ event: "dashboard_query_error", detail: safeError(error) }));
+    return json({ error: "Dashboard intelligence is temporarily unavailable" }, 503, request, env);
   }
 }
 

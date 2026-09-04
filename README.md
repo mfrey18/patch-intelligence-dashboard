@@ -101,7 +101,7 @@ The focused suites cover normalized adapter fixtures, hashing and revision diffs
 - `GET /api/cves/:id` — canonical CVE data, vendor assertions, affected products, remediation, exploitation evidence, KEV, EPSS current/history, timeline, and source links.
 - `POST /api/internal/ingest` — bearer-protected, idempotent, source-allowlisted ingestion with bounded request size and per-source leases.
 - `GET /api/internal/health` — bearer-protected D1 size, row/index inventory, EPSS growth, representative query latency, and directional capacity projections.
-- `POST /api/internal/retention` — bearer-protected rolling retention for EPSS history plus completed-checkpoint and expired-lease housekeeping; advisory/revision audit history is preserved.
+- `POST /api/internal/retention` — bearer-protected retention that keeps daily EPSS observations for 42 days and one published point per week for the rest of the six-month window, plus completed-checkpoint and expired-lease housekeeping; advisory/revision audit history is preserved.
 - `POST /api/internal/projection` — bearer-protected reconciliation/population of the disposable dashboard read model.
 - `GET /api/internal/monitor` — bearer-protected projection parity/freshness, source health, lease, batch-bound, and core-latency monitoring.
 
@@ -120,7 +120,7 @@ See `docs/github-pages-cloudflare.md` for the one-time D1 setup and required Git
 - Adobe and Fortinet require configured authoritative machine-readable endpoints; Apple exposes only HTML publicly, while SAP Security Notes require entitlement. VMware/Broadcom, Citrix, and Chrome are intentionally deferred because no stable official structured advisory feed was verified. HTML/portal parsers were not introduced.
 - Daily production scheduling is limited to sources that currently satisfy both the authoritative-data policy and Workers Free execution bounds: Microsoft, Cisco, CISA KEV, FIRST EPSS, Palo Alto Networks, and Mozilla. Ivanti RSS is advisory-only for most current entries and is not claimed as complete CVE coverage. Oracle CPU/CSPU and Atlassian remain manual validation sources until their large-document/pagination paths are proven within Free-plan CPU and D1/subrequest limits.
 - RSS discovery is a current-feed mechanism and cannot guarantee a complete six-month backfill. A verified vendor manifest or entitled feed is required before claiming historical completeness for those sources.
-- The public query and retained EPSS trend data are constrained to a rolling six-month window. Advisory revisions, intelligence changes, and source-run audit records are retained when relational or audit value requires them.
+- The public query is constrained to a rolling six-month window. EPSS keeps daily points for 42 days and weekly points for the older portion of that window. Advisory revisions, intelligence changes, and source-run audit records are retained when relational or audit value requires them.
 
 The production-readiness decision and runbook are in `docs/production-readiness.md`. The current capacity snapshot is recorded in `docs/d1-production-baseline.md`.
 

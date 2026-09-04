@@ -26,11 +26,16 @@ test("dashboard projection is atomically published from authoritative tables", a
   };
 
   const result = await refreshDashboardProjection(db, "run-1", new Date("2026-08-26T00:00:00.000Z"));
-  assert.deepEqual(batchSizes, [2, 4]);
+  assert.deepEqual(batchSizes, [2, 6]);
   assert.equal(result.cveCount, 7);
   assert.equal(result.parity.status, "passed");
   assert.ok(prepared.some((statement) => /FROM cves c LEFT JOIN advisory_cves/.test(statement.sql)));
-  assert.ok(prepared.some((statement) => /DELETE FROM cve_dashboard_facts$/.test(statement.sql)));
+  assert.ok(prepared.some((statement) => /product_assertions AS/.test(statement.sql)));
+  assert.ok(prepared.some((statement) => /FROM parity_rows/.test(statement.sql)));
+  assert.ok(!prepared.some((statement) => /SELECT GROUP_CONCAT\(DISTINCT pp\.name\)/.test(statement.sql)));
+  assert.ok(prepared.some((statement) => /DELETE FROM cve_dashboard_facts WHERE NOT EXISTS/.test(statement.sql)));
+  assert.ok(prepared.some((statement) => /INSERT OR IGNORE INTO cve_dashboard_facts/.test(statement.sql)));
+  assert.ok(prepared.some((statement) => /UPDATE cve_dashboard_facts SET[\s\S]*epss_percentile/.test(statement.sql)));
   assert.ok(prepared.some((statement) => /dashboard_projection_state/.test(statement.sql)));
 });
 
@@ -54,6 +59,9 @@ test("dashboard selects the read model with canonical fallback and a core respon
   assert.match(source, /buildCanonicalFilteredCte/);
   assert.match(source, /params\.get\("include"\) === "core"/);
   assert.match(source, /canonical_fallback/);
+  assert.match(source, /no such table:\\s\*dashboard_projection_state/);
+  assert.match(source, /current_product_rows AS/);
+  assert.match(source, /product_names AS/);
 });
 
 test("deployment populates the projection after Worker deploy and before smoke tests", () => {

@@ -47,7 +47,11 @@ jobs:
         run: |
           d1_info="$(pnpm exec wrangler d1 info "$CLOUDFLARE_D1_DATABASE_NAME" --json)"
           database_bytes="$(echo "$d1_info" | jq -er '.database_size | tonumber | select(. > 0)')"
-          jq --argjson databaseBytes "$database_bytes" '. + {databaseBytes:$databaseBytes,databaseWarningBytes:400000000}' operations-monitor.json > operations-monitor-with-capacity.json
+          rows_read_24h="$(echo "$d1_info" | jq -r '(.rows_read_24h // 0) | tonumber')"
+          rows_written_24h="$(echo "$d1_info" | jq -r '(.rows_written_24h // 0) | tonumber')"
+          jq --argjson databaseBytes "$database_bytes" --argjson rowsRead24h "$rows_read_24h" --argjson rowsWritten24h "$rows_written_24h" \
+            '. + {databaseBytes:$databaseBytes,databaseWarningBytes:400000000,rowsRead24h:$rowsRead24h,rowsReadWarning24h:4000000,rowsWritten24h:$rowsWritten24h,rowsWrittenWarning24h:80000}' \
+            operations-monitor.json > operations-monitor-with-capacity.json
       - name: Archive operational health
         if: always()
         uses: actions/upload-artifact@v4
@@ -69,6 +73,8 @@ jobs:
             if (fs.existsSync(path)) monitor = JSON.parse(fs.readFileSync(path, 'utf8'));
             const alerts = monitor?.alerts ?? [{ severity: 'critical', code: 'monitor_unavailable', message: 'The production monitor did not produce a readable result.' }];
             if (monitor?.databaseBytes >= monitor?.databaseWarningBytes) alerts.push({ severity: 'critical', code: 'd1_capacity', message: `D1 is ${monitor.databaseBytes} bytes; warning threshold is ${monitor.databaseWarningBytes} bytes.` });
+            if (monitor?.rowsRead24h >= monitor?.rowsReadWarning24h) alerts.push({ severity: 'warning', code: 'd1_rows_read_pressure', message: `D1 reported ${monitor.rowsRead24h} rows read over the rolling 24-hour observation; warning threshold is ${monitor.rowsReadWarning24h}.` });
+            if (monitor?.rowsWritten24h >= monitor?.rowsWrittenWarning24h) alerts.push({ severity: 'warning', code: 'd1_rows_written_pressure', message: `D1 reported ${monitor.rowsWritten24h} rows written over the rolling 24-hour observation; warning threshold is ${monitor.rowsWrittenWarning24h}.` });
             if (process.env.MONITOR_JOB_STATUS !== 'success' && alerts.length === 0) alerts.push({ severity: 'critical', code: 'monitor_workflow_failed', message: 'The production monitoring workflow failed outside the runtime alert checks.' });
             const unhealthy = process.env.MONITOR_JOB_STATUS !== 'success' || monitor?.status !== 'healthy' || alerts.length > 0;
             const { data: issues } = await github.rest.issues.listForRepo({ owner: context.repo.owner, repo: context.repo.repo, state: 'open', per_page: 100 });

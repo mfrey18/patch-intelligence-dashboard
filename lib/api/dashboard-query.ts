@@ -144,24 +144,56 @@ async function hasPublishedProjection(db: D1Database): Promise<boolean> {
   try {
     const state = await db.prepare("SELECT cve_count FROM dashboard_projection_state WHERE id='current' AND status='published'").first<{ cve_count: number }>();
     return Number(state?.cve_count ?? 0) > 0;
-  } catch {
-    return false;
+  } catch (error) {
+    if (error instanceof Error && /no such table:\s*dashboard_projection_state/i.test(error.message)) return false;
+    throw error;
   }
 }
 
 export async function queryCanonicalProjectionParity(db: D1Database): Promise<ProjectionParityMetrics> {
-  const { cte, bindings } = buildCanonicalFilteredCte(new URLSearchParams());
-  const row = await db.prepare(`${cte} SELECT COUNT(*) total,
+  const row = await db.prepare(`${canonicalParityCte()} SELECT COUNT(*) total,
     COALESCE(SUM(severity_rank=4),0) critical,COALESCE(SUM(severity_rank=3),0) high,
     COALESCE(SUM(known_exploited),0) known_exploited,COALESCE(SUM(kev),0) kev,
     COALESCE(SUM(zero_day),0) zero_day,COALESCE(SUM(patch_available=1),0) patch_available,
     COALESCE(SUM(kev=1 OR known_exploited=1),0) p1,
     COALESCE(SUM(kev=0 AND known_exploited=0 AND ((severity_rank=4 AND epss_percentile>=?) OR (severity_rank=3 AND epss_percentile>=?))),0) p2,
-    COALESCE(SUM(instr(lower(vendor),'microsoft')>0),0) microsoft,
-    COALESCE(SUM(instr(lower(vendor),'cisco')>0),0) cisco
-    FROM filtered`).bind(...bindings, PRIORITY_THRESHOLDS.criticalHighEpssPercentile, PRIORITY_THRESHOLDS.highVeryHighEpssPercentile).first<Record<string, number>>();
+    COALESCE(SUM(microsoft),0) microsoft,COALESCE(SUM(cisco),0) cisco
+    FROM parity_rows`).bind(PRIORITY_THRESHOLDS.criticalHighEpssPercentile, PRIORITY_THRESHOLDS.highVeryHighEpssPercentile).first<Record<string, number>>();
   return parityMetrics(row);
 }
+
+function canonicalParityCte(): string { return `WITH current_epss AS (
+  SELECT eo.cve_id,eo.percentile FROM epss_observations eo
+  JOIN epss_datasets ed ON ed.score_date=eo.score_date AND ed.is_current=1 AND ed.status='published'
+), latest_revisions AS (
+  SELECT ar.id,ar.advisory_id FROM advisory_revisions ar
+  WHERE ar.id=(SELECT ar2.id FROM advisory_revisions ar2 WHERE ar2.advisory_id=ar.advisory_id ORDER BY ar2.observed_at DESC LIMIT 1)
+), current_remediation_rows AS (
+  SELECT r.cve_id,r.advisory_id,r.patch_available FROM remediations r
+  JOIN latest_revisions lr ON lr.id=r.advisory_revision_id
+), remediation_assertions AS (
+  SELECT cve_id,patch_available FROM current_remediation_rows WHERE cve_id IS NOT NULL
+  UNION ALL
+  SELECT ac.cve_id,r.patch_available FROM current_remediation_rows r
+  JOIN advisory_cves ac ON ac.advisory_id=r.advisory_id WHERE r.cve_id IS NULL
+), remediation_flags AS (
+  SELECT cve_id,MAX(CASE WHEN patch_available=1 THEN 1 WHEN patch_available=0 THEN 0 END) patch_available
+  FROM remediation_assertions GROUP BY cve_id
+), parity_rows AS (
+  SELECT c.id cve_id,
+    MAX(CASE WHEN a.id IS NULL THEN 0 ELSE CASE ac.normalized_severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END END) severity_rank,
+    ce.percentile epss_percentile,
+    EXISTS(SELECT 1 FROM kev_entries k WHERE k.cve_id=c.id AND k.active=1) kev,
+    EXISTS(SELECT 1 FROM exploit_evidence ee WHERE ee.cve_id=c.id AND ee.evidence_type='known_exploitation' AND ee.status='confirmed') known_exploited,
+    EXISTS(SELECT 1 FROM exploit_evidence ee WHERE ee.cve_id=c.id AND ee.evidence_type='zero_day' AND ee.status='confirmed') zero_day,
+    MAX(rf.patch_available) patch_available,
+    MAX(a.vendor_id='microsoft') microsoft,MAX(a.vendor_id='cisco') cisco
+  FROM cves c LEFT JOIN advisory_cves ac ON ac.cve_id=c.id
+  LEFT JOIN advisories a ON a.id=ac.advisory_id AND COALESCE(a.published_at,a.source_updated_at)>=date('now','-${INTELLIGENCE_WINDOW_MONTHS} months')
+  LEFT JOIN current_epss ce ON ce.cve_id=c.id LEFT JOIN remediation_flags rf ON rf.cve_id=c.id
+  WHERE a.id IS NOT NULL OR EXISTS(SELECT 1 FROM kev_entries k WHERE k.cve_id=c.id AND k.active=1 AND date(k.date_added)>=date('now','-${INTELLIGENCE_WINDOW_MONTHS} months'))
+  GROUP BY c.id,ce.percentile
+)`; }
 
 function parityMetrics(row: Record<string, number> | null): ProjectionParityMetrics {
   const total = Number(row?.total ?? 0); const p1 = Number(row?.p1 ?? 0); const p2 = Number(row?.p2 ?? 0);
@@ -322,6 +354,18 @@ function buildCanonicalFilteredCte(params: URLSearchParams): { cte: string; bind
   ), latest_revisions AS (
     SELECT ar.id, ar.advisory_id FROM advisory_revisions ar
     WHERE ar.id=(SELECT ar2.id FROM advisory_revisions ar2 WHERE ar2.advisory_id=ar.advisory_id ORDER BY ar2.observed_at DESC LIMIT 1)
+  ), current_product_rows AS (
+    SELECT ap.cve_id,ap.advisory_id,p.name FROM affected_products ap
+    JOIN latest_revisions lr ON lr.id=ap.advisory_revision_id JOIN products p ON p.id=ap.product_id
+    JOIN advisories pa ON pa.id=ap.advisory_id
+    WHERE COALESCE(pa.published_at,pa.source_updated_at)>=date('now','-${INTELLIGENCE_WINDOW_MONTHS} months')
+  ), product_assertions AS (
+    SELECT cve_id,name FROM current_product_rows WHERE cve_id IS NOT NULL
+    UNION ALL
+    SELECT ac.cve_id,pr.name FROM current_product_rows pr JOIN advisory_cves ac ON ac.advisory_id=pr.advisory_id
+    WHERE pr.cve_id IS NULL
+  ), product_names AS (
+    SELECT cve_id,GROUP_CONCAT(DISTINCT name) product FROM product_assertions GROUP BY cve_id
   ), current_remediation_rows AS (
     SELECT r.cve_id, r.advisory_id, r.patch_available, r.kind
     FROM remediations r JOIN latest_revisions lr ON lr.id=r.advisory_revision_id
@@ -340,7 +384,7 @@ function buildCanonicalFilteredCte(params: URLSearchParams): { cte: string; bind
   ), base AS (
     SELECT c.id cve_id, COALESCE(c.description, MAX(CASE WHEN a.id IS NOT NULL THEN ac.vendor_description END), MAX(a.title), c.id) title,
       COALESCE(GROUP_CONCAT(DISTINCT v.name),'CISA KEV') vendor,
-      (SELECT GROUP_CONCAT(DISTINCT pp.name) FROM advisory_cves pac JOIN advisories pa ON pa.id=pac.advisory_id JOIN latest_revisions par ON par.advisory_id=pa.id JOIN affected_products pap ON pap.advisory_id=pa.id AND (pap.cve_id=c.id OR pap.cve_id IS NULL) AND pap.advisory_revision_id=par.id JOIN products pp ON pp.id=pap.product_id WHERE pac.cve_id=c.id AND COALESCE(pa.published_at,pa.source_updated_at)>=date('now','-${INTELLIGENCE_WINDOW_MONTHS} months')) product,
+      pn.product,
       MAX(CASE WHEN a.id IS NULL THEN 0 ELSE CASE ac.normalized_severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END END) severity_rank,
       MAX(CASE WHEN a.id IS NOT NULL THEN ac.vendor_cvss_score END) cvss, ce.score epss, ce.percentile epss_percentile,
       CASE WHEN EXISTS(SELECT 1 FROM kev_entries k WHERE k.cve_id=c.id AND k.active=1) THEN 1 ELSE 0 END kev,
@@ -356,9 +400,10 @@ function buildCanonicalFilteredCte(params: URLSearchParams): { cte: string; bind
       LEFT JOIN vendors v ON v.id=a.vendor_id
       LEFT JOIN latest_revisions ar ON ar.advisory_id=a.id
       LEFT JOIN current_epss ce ON ce.cve_id=c.id
+      LEFT JOIN product_names pn ON pn.cve_id=c.id
       LEFT JOIN remediation_flags rf ON rf.cve_id=c.id
     WHERE (a.id IS NOT NULL OR EXISTS(SELECT 1 FROM kev_entries scope_kev WHERE scope_kev.cve_id=c.id AND scope_kev.active=1 AND date(scope_kev.date_added)>=date('now','-${INTELLIGENCE_WINDOW_MONTHS} months'))) AND ${where.join(" AND ")}
-    GROUP BY c.id, ce.score, ce.percentile
+    GROUP BY c.id, ce.score, ce.percentile, pn.product
   ), filtered AS (SELECT * FROM base WHERE ${outer.join(" AND ")})`;
   return { cte, bindings };
 }

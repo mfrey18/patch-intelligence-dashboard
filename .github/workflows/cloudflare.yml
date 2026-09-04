@@ -86,9 +86,9 @@ jobs:
       - name: Smoke-test Worker and public API
         run: |
           dashboard="$(curl --fail --silent --show-error "$PUBLIC_API_BASE_URL/api/dashboard?limit=1")"
-          echo "$dashboard" | jq -e '.metrics.total >= 0 and (.rows | type == "array") and (.priorityDistribution.P1 >= 0)'
+          echo "$dashboard" | jq -e '(.demo // false) == false and .metrics.total > 0 and (.rows | type == "array") and (.priorityDistribution.P1 >= 0)'
           for query in 'vendor=microsoft' 'vendor=cisco' 'kev=true' 'priority=P1' 'patchAvailable=true'; do
-            curl --fail --silent --show-error "$PUBLIC_API_BASE_URL/api/dashboard?limit=1&$query" | jq -e '.metrics.total >= 0 and (.rows | type == "array")' > /dev/null
+            curl --fail --silent --show-error "$PUBLIC_API_BASE_URL/api/dashboard?limit=1&$query" | jq -e '(.demo // false) == false and .metrics.total >= 0 and (.rows | type == "array")' > /dev/null
           done
           for panel in activity emerging epss-movers vendor-threats cwe products patch-tuesday; do
             curl --fail --silent --show-error "$PUBLIC_API_BASE_URL/api/dashboard/analytics/$panel" | jq -e --arg panel "$panel" '.panel == $panel' > /dev/null
