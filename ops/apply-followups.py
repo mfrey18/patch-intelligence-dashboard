@@ -142,6 +142,8 @@ def rollback(previous):
     os.unlink(temporary)
     try:
         os.symlink(previous, temporary)
+        if hasattr(os, 'lchmod'):
+            os.lchmod(temporary, 0o755)
         os.replace(temporary, ROOT / 'current')
     finally:
         if os.path.lexists(temporary):
@@ -175,6 +177,7 @@ def apply(release, archive, digest):
         write_json(report_path, report)
         print(f'Verification report: {report_path}', flush=True)
         deployed = False
+        deployment_attempted = False
         try:
             before, before_ms = dashboard('/api/dashboard?include=products')
             write_json(ROOT / 'logs' / f'followups-{identity}-before.json', before)
@@ -191,6 +194,7 @@ def apply(release, archive, digest):
                     raise RuntimeError('Incoming must be an existing directory, not a symlink')
                 atomic_write(ROOT / 'ops/deploy-release.sh', (OPS / 'deploy-release.sh').read_bytes(), 0o755)
                 atomic_write(incoming / f'{release}.tar.gz', snapshot, 0o600)
+                deployment_attempted = True
                 run(ROOT / 'ops/deploy-release.sh', release)
                 deployed = True
                 report['deployment'] = 'applied'
@@ -211,10 +215,16 @@ def apply(release, archive, digest):
             report['status'] = 'failed'
             report['error'] = str(error)
             try:
-                # The helper can switch before readiness fails; inspect the actual link.
-                if deployed or current_release() != previous:
+                # A failed helper may already have restored the previous release.
+                # Record observed state without claiming it ever switched if that is unknown.
+                active = current_release()
+                report['activeRelease'] = active.name
+                if deployed or active != previous:
                     rollback(previous)
                     report['deployment'] = 'rolled-back'
+                    report['activeRelease'] = previous.name
+                elif deployment_attempted:
+                    report['deployment'] = 'failed-previous-release-active'
             except (RuntimeError, OSError, subprocess.SubprocessError) as recovery_error:
                 report['rollbackError'] = str(recovery_error)
             write_json(report_path, report)

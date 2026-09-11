@@ -51,7 +51,11 @@ sudo -u _patchapp --preserve-env=MIGRATION_DATABASE_URL "$ROOT/runtime/node" --i
 unset MIGRATION_DATABASE_URL
 # Deployment metadata must never be writable by the running application.
 chown -R root:staff "$destination"
-chmod -R a-w "$destination"
+# A sudo caller may use umask 077, including for the release root and pnpm's
+# installed dependencies. Normalize runtime access before removing writes.
+# Recursive chmod does not follow nested symlinks on macOS or Linux; package
+# links stay intact and cannot alter permissions outside this release.
+chmod -R a+rX,a-w "$destination"
 previous=$(readlink "$ROOT/current" || true)
 ln -s "$destination" "$ROOT/current.next"
 mv -fh "$ROOT/current.next" "$ROOT/current"

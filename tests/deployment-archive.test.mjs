@@ -7,9 +7,12 @@ test('deployment extraction rejects unsafe members and ignores archive permissio
   const result = spawnSync('python3', ['-', fileURLToPath(new URL('../ops/deploy-release.sh', import.meta.url))], {
     encoding: 'utf8',
     input: String.raw`
-import ast,io,os,pathlib,stat,sys,tarfile,tempfile
+import ast,io,os,pathlib,stat,subprocess,sys,tarfile,tempfile
 
-script=pathlib.Path(sys.argv[1]).read_text().split("<<'PY'\n",1)[1].split("\nPY",1)[0]
+deployment=pathlib.Path(sys.argv[1]).read_text()
+script=deployment.split("<<'PY'\n",1)[1].split("\nPY",1)[0]
+# Reproduce the administrator follow-up's restrictive inherited umask.
+os.umask(0o077)
 with tempfile.TemporaryDirectory(prefix='patch-archive-test-') as temporary:
     base=pathlib.Path(temporary)
     class IsolateStaging(ast.NodeTransformer):
@@ -51,6 +54,33 @@ with tempfile.TemporaryDirectory(prefix='patch-archive-test-') as temporary:
     assert stat.S_IMODE((base/'release/nested/app').stat().st_mode)==0o755
     assert stat.S_IMODE((base/'release/nested').stat().st_mode)==0o755
 
+    # The archive has no top-level member to set its root mode. Dependency
+    # installation also inherits 077, producing private files/directories.
+    release=base/'release'
+    assert stat.S_IMODE(release.stat().st_mode)==0o700
+    dependency=release/'node_modules/.pnpm/example/node_modules/example'
+    dependency.mkdir(parents=True)
+    (dependency/'index.js').write_text('export const ready = true;\n')
+    executable=dependency/'cli';executable.write_text('#!/bin/sh\nexit 0\n');executable.chmod(0o700)
+    package_link=release/'node_modules/example'
+    package_link.symlink_to('.pnpm/example/node_modules/example')
+    outside=base/'outside';outside.mkdir();(outside/'private').write_text('outside release')
+    (release/'node_modules/external').symlink_to(outside)
+    assert stat.S_IMODE((dependency/'index.js').stat().st_mode)==0o600
+    # Execute the helper's actual final permission command on this extracted
+    # release and simulated dependency tree, without privileged host commands.
+    permissions=next(line for line in deployment.splitlines() if line.startswith('chmod -R '))
+    subprocess.run(['/bin/bash','-c',permissions],env={**os.environ,'destination':str(release)},check=True)
+    for directory in [release,release/'nested',release/'node_modules',dependency]:
+        assert stat.S_IMODE(directory.stat().st_mode)==0o555,directory
+    assert stat.S_IMODE((dependency/'index.js').stat().st_mode)==0o444
+    assert stat.S_IMODE(executable.stat().st_mode)==0o555
+    assert stat.S_IMODE((release/'nested/app').stat().st_mode)==0o555
+    assert package_link.is_symlink()
+    assert (package_link/'index.js').read_text()=='export const ready = true;\n'
+    assert stat.S_IMODE(outside.stat().st_mode)==0o700
+    assert stat.S_IMODE((outside/'private').stat().st_mode)==0o600
+
     for index,(name,kind) in enumerate([
         ('../escape',tarfile.REGTYPE),('/absolute',tarfile.REGTYPE),
         ('nested/link',tarfile.SYMTYPE),('nested/hardlink',tarfile.LNKTYPE),
@@ -80,7 +110,7 @@ with tempfile.TemporaryDirectory(prefix='patch-archive-test-') as temporary:
     try:execute(valid,base/'snapshot-release')
     finally:tarfile.open=original_open
     assert (base/'snapshot-release/nested/app').read_bytes()==b'reviewed release data\n'
-print('Verified metadata sanitization, traversal/link/device rejection, and immutable extraction snapshot')
+print('Verified archive safety and service-readable immutable releases under umask 077, including dependency symlinks')
 `,
   });
   assert.equal(result.status, 0, result.stderr || result.error?.message);
