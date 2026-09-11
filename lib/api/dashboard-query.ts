@@ -250,28 +250,30 @@ async function queryVendorThreatSeries(db: Database, cte: string, bindings: unkn
 
 async function queryProductSeries(db: Database, cte: string, bindings: unknown[], vendorId: string | null): Promise<DashboardResponse["productSeries"]> {
   // Select each current revision once before expanding product/CVE associations.
-  // Separate advisory-wide assertions from specific CVEs to avoid an OR join
-  // multiplying revision lookups for advisories with many products and CVEs.
+  // Deduplicate versions/families within each indexed revision before expanding
+  // advisory-wide CVEs; this bounds sorting and avoids correlated join estimates.
   const result = await db.prepare(`${cte}, product_series_latest_revisions AS MATERIALIZED (
     SELECT DISTINCT ON (pr.advisory_id) pr.advisory_id,pr.id
     FROM advisory_revisions pr JOIN advisories pa ON pa.id=pr.advisory_id
     WHERE (?='' OR pa.vendor_id=?)
     ORDER BY pr.advisory_id,pr.observed_at DESC,pr.id DESC
   ), product_series_current_products AS MATERIALIZED (
-    SELECT pap.advisory_id,pap.cve_id,COALESCE(p.family,p.name) label
-    FROM product_series_latest_revisions lr
-    JOIN affected_products pap ON pap.advisory_id=lr.advisory_id AND pap.advisory_revision_id=lr.id
-    JOIN products p ON p.id=pap.product_id
-  ), product_series_assertions AS (
+    SELECT lr.advisory_id,pc.cve_id,pc.label
+    FROM product_series_latest_revisions lr CROSS JOIN LATERAL (
+      SELECT DISTINCT pap.cve_id,COALESCE(p.family,p.name) label
+      FROM affected_products pap JOIN products p ON p.id=pap.product_id
+      WHERE pap.advisory_id=lr.advisory_id AND pap.advisory_revision_id=lr.id
+    ) pc
+  ), product_series_assertions AS MATERIALIZED (
     SELECT pc.label,pac.cve_id FROM product_series_current_products pc
     JOIN advisory_cves pac ON pac.advisory_id=pc.advisory_id AND pac.cve_id=pc.cve_id
     WHERE pc.cve_id IS NOT NULL
-    UNION ALL
+    UNION
     SELECT pc.label,pac.cve_id FROM product_series_current_products pc
     JOIN advisory_cves pac ON pac.advisory_id=pc.advisory_id
     WHERE pc.cve_id IS NULL
   )
-    SELECT psa.label,COUNT(DISTINCT f.cve_id) value
+    SELECT psa.label,COUNT(*) value
     FROM product_series_assertions psa JOIN filtered f ON f.cve_id=psa.cve_id
     GROUP BY psa.label ORDER BY value DESC, label LIMIT 12`).bind(...bindings, vendorId ?? "", vendorId ?? "").all<{ label: string; value: number }>();
   return (result.results ?? []).map((row) => ({ label: row.label, value: Number(row.value) }));
@@ -492,14 +494,34 @@ export async function queryPatchTuesdayEvents(db: Database, limit = 12): Promise
       JOIN advisory_cves ac ON ac.advisory_id=rea.advisory_id
       WHERE rea.release_event_id IN (${placeholders}) AND (a.vendor_advisory_id ILIKE 'advisory:%' OR a.vendor_advisory_id ILIKE 'release-membership:%')
       GROUP BY rea.release_event_id`).bind(...ids).all<Record<string, unknown>>(),
-    db.prepare(`SELECT rea.release_event_id,COALESCE(p.family,p.name) label,COUNT(DISTINCT ac.cve_id) value
-      FROM release_event_advisories rea JOIN advisories a ON a.id=rea.advisory_id
-      JOIN advisory_revisions ar ON ar.id=(SELECT ar2.id FROM advisory_revisions ar2 WHERE ar2.advisory_id=a.id ORDER BY ar2.observed_at DESC LIMIT 1)
-      JOIN affected_products ap ON ap.advisory_revision_id=ar.id JOIN products p ON p.id=ap.product_id
-      JOIN advisory_cves ac ON ac.advisory_id=a.id AND (ap.cve_id IS NULL OR ac.cve_id=ap.cve_id)
-      WHERE rea.release_event_id IN (${placeholders}) AND a.vendor_advisory_id ILIKE 'advisory:%'
-      GROUP BY rea.release_event_id,COALESCE(p.family,p.name)
-      ORDER BY rea.release_event_id,value DESC`).bind(...ids).all<Record<string, unknown>>(),
+    db.prepare(`WITH event_advisories AS MATERIALIZED (
+        SELECT rea.release_event_id,a.id advisory_id
+        FROM release_event_advisories rea JOIN advisories a ON a.id=rea.advisory_id
+        WHERE rea.release_event_id IN (${placeholders}) AND a.vendor_advisory_id ILIKE 'advisory:%'
+      ), event_latest_revisions AS MATERIALIZED (
+        SELECT DISTINCT ON (ar.advisory_id) ar.advisory_id,ar.id
+        FROM advisory_revisions ar WHERE EXISTS(SELECT 1 FROM event_advisories ea WHERE ea.advisory_id=ar.advisory_id)
+        ORDER BY ar.advisory_id,ar.observed_at DESC,ar.id DESC
+      ), event_current_products AS MATERIALIZED (
+        SELECT ar.advisory_id,pc.cve_id,pc.label
+        FROM event_latest_revisions ar CROSS JOIN LATERAL (
+          SELECT DISTINCT ap.cve_id,COALESCE(p.family,p.name) label
+          FROM affected_products ap JOIN products p ON p.id=ap.product_id
+          WHERE ap.advisory_revision_id=ar.id
+        ) pc
+      ), event_product_cves AS MATERIALIZED (
+        SELECT ea.release_event_id,pc.label,ac.cve_id
+        FROM event_advisories ea JOIN event_current_products pc ON pc.advisory_id=ea.advisory_id
+        JOIN advisory_cves ac ON ac.advisory_id=pc.advisory_id AND ac.cve_id=pc.cve_id
+        WHERE pc.cve_id IS NOT NULL
+        UNION
+        SELECT ea.release_event_id,pc.label,ac.cve_id
+        FROM event_advisories ea JOIN event_current_products pc ON pc.advisory_id=ea.advisory_id
+        JOIN advisory_cves ac ON ac.advisory_id=pc.advisory_id
+        WHERE pc.cve_id IS NULL
+      ) SELECT release_event_id,label,COUNT(*) value FROM event_product_cves
+      GROUP BY release_event_id,label
+      ORDER BY release_event_id,value DESC,label`).bind(...ids).all<Record<string, unknown>>(),
   ]);
   const stats = new Map((statsResult.results ?? []).map((row) => [String(row.release_event_id), row]));
   const products = new Map<string, Array<{ label: string; value: number }>>();

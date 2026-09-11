@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { testDatabase } from './database.mjs';
 import { seedIngestionCatalog } from '../../lib/ingestion/postgres-repository.ts';
-import { queryDashboardAnalytics } from '../../lib/api/dashboard-query.ts';
+import { queryDashboardAnalytics, queryPatchTuesdayEvents } from '../../lib/api/dashboard-query.ts';
 
 test('product series uses current revisions, expands advisory-wide products and counts distinct filtered CVEs', async () => {
   const db = await testDatabase();
@@ -18,7 +18,7 @@ test('product series uses current revisions, expands advisory-wide products and 
       ['c', 'palo-alto', 'palo-alto-psirt-csaf', [1, 2]],
     ]) {
       await db.prepare(`INSERT INTO advisories(id,vendor_id,source_id,vendor_advisory_id,title,source_url,published_at,created_at,updated_at)
-        VALUES (?,?,?,?,?,'https://vendor.example/advisory',now(),now(),now())`).bind(id, vendor, source, id, 'Advisory ' + id).run();
+        VALUES (?,?,?,?,?,'https://vendor.example/advisory',now(),now(),now())`).bind(id, vendor, source, 'advisory:' + id, 'Advisory ' + id).run();
       for (const index of linked) {
         await db.prepare("INSERT INTO advisory_cves(advisory_id,cve_id,normalized_severity) VALUES (?,?,'high')").bind(id, cves[index]).run();
       }
@@ -66,6 +66,24 @@ test('product series uses current revisions, expands advisory-wide products and 
     assert.deepEqual(await products('vendor=palo-alto'), [{ label: 'Delta', value: 2 }, { label: 'Alpha', value: 1 }]);
     assert.deepEqual(Object.fromEntries((await products('q=CVE-2026-1003')).map(row => [row.label, row.value])), { Alpha: 1, Delta: 1 });
     assert.deepEqual(await products('q=no-matching-cve'), []);
+
+    // Release families also count CVEs once across duplicated versions,
+    // advisory-wide assertions, and multiple linked advisories. A second event
+    // sharing an advisory retains its own count, and older revisions stay out.
+    for (const [id, date, advisories] of [
+      ['current-event', '2026-09-08', ['a', 'b']],
+      ['previous-event', '2026-08-11', ['b']],
+    ]) {
+      await db.prepare(`INSERT INTO release_events(id,vendor_id,event_type,event_date,label,created_at,updated_at)
+        VALUES (?,'microsoft','patch_tuesday',?,?,now(),now())`).bind(id, date, id).run();
+      for (const advisory of advisories) {
+        await db.prepare('INSERT INTO release_event_advisories(release_event_id,advisory_id) VALUES (?,?)').bind(id, advisory).run();
+      }
+    }
+    const [currentEvent, previousEvent] = await queryPatchTuesdayEvents(db);
+    assert.deepEqual(Object.fromEntries(currentEvent.linkedProductFamilies.map(row => [row.label, row.value])), { Alpha: 2, Beta: 1, alpha: 1, Zeta: 1 });
+    assert.deepEqual(previousEvent.linkedProductFamilies, [{ label: 'Alpha', value: 1 }]);
+    assert.deepEqual((await queryPatchTuesdayEvents(db, 1))[0].linkedProductFamilies, currentEvent.linkedProductFamilies);
 
     // Exercise the same query with the published projection's independently built
     // filtered CTE; the current product relation must preserve identical results.
