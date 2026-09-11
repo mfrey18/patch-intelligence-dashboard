@@ -1,5 +1,6 @@
+import type { Database, Statement } from "../../../db/database";
 import type { IngestResult } from "../contracts";
-import { D1IngestionRepository } from "../d1-repository";
+import { PostgresIngestionRepository } from "../postgres-repository";
 import { sha256, stableSerialize } from "../hash";
 import { DEFAULT_SOURCE_POLICY } from "../contracts";
 import { fetchWithPolicy, readJsonLimited, sanitizeText } from "../safety";
@@ -33,8 +34,8 @@ export function parseCisaKevSnapshot(payload: unknown, sourceUrl = CISA_KEV_URL)
   return { catalogVersion: requiredString(root.catalogVersion, "catalogVersion"), dateReleased: new Date(dateReleased).toISOString(), count, entries, sourceUrl };
 }
 
-export async function ingestCisaKev(db: D1Database, idempotencyKey?: string): Promise<IngestResult> {
-  const repository = new D1IngestionRepository(db);
+export async function ingestCisaKev(db: Database, idempotencyKey?: string): Promise<IngestResult> {
+  const repository = new PostgresIngestionRepository(db);
   const startedAt = new Date().toISOString();
   const metadata = { mode: "delta" as const, maxItems: 1 };
   const { runId, reused } = await repository.beginRun("cisa-kev", idempotencyKey, metadata);
@@ -47,6 +48,8 @@ export async function ingestCisaKev(db: D1Database, idempotencyKey?: string): Pr
     try { response = await fetchWithPolicy(CISA_KEV_URL, DEFAULT_SOURCE_POLICY); }
     catch { sourceUrl = CISA_KEV_FALLBACK_URL; response = await fetchWithPolicy(sourceUrl, DEFAULT_SOURCE_POLICY); }
     const snapshot = parseCisaKevSnapshot(await readJsonLimited(response, DEFAULT_SOURCE_POLICY.maxResponseBytes), sourceUrl);
+    return await db.transaction(async db => {
+    const repository = new PostgresIngestionRepository(db);
     const existingRows = await db.prepare(`SELECT k.cve_id,k.due_date,k.entry_hash,k.active,
       EXISTS(SELECT 1 FROM exploit_evidence ee WHERE ee.cve_id=k.cve_id AND ee.source_id='cisa-kev'
         AND ee.evidence_type='known_exploitation' AND ee.status='confirmed') evidence_present
@@ -60,7 +63,7 @@ export async function ingestCisaKev(db: D1Database, idempotencyKey?: string): Pr
     const now = new Date().toISOString();
     const counts = { discovered: snapshot.count, inserted: 0, changed: 0, unchanged: 0, failed: 0 };
     const seen = new Set<string>();
-    const statements: D1PreparedStatement[] = [];
+    const statements: Statement[] = [];
     for (const entry of snapshot.entries) {
       seen.add(entry.cveId);
       const entryHash = await sha256(entry);
@@ -68,15 +71,15 @@ export async function ingestCisaKev(db: D1Database, idempotencyKey?: string): Pr
       const changeTypes = !previous ? ["KEV_ADDED"] : previous.due_date !== entry.dueDate ? ["KEV_DEADLINE_CHANGED", ...(previous.entry_hash !== entryHash ? ["KEV_ENTRY_MODIFIED"] : [])] : previous.entry_hash !== entryHash ? ["KEV_ENTRY_MODIFIED"] : [];
       if (!previous) counts.inserted += 1; else if (changeTypes.length) counts.changed += 1; else counts.unchanged += 1;
       if (!previous || changeTypes.length > 0 || !previous.active || !previous.evidence_present) {
-        statements.push(db.prepare("INSERT OR IGNORE INTO cves (id, created_at, updated_at) VALUES (?, ?, ?)").bind(entry.cveId, now, now));
-        statements.push(db.prepare("INSERT INTO kev_entries (cve_id, source_run_id, active, date_added, due_date, required_action, known_ransomware_campaign_use, entry_hash, source_url, first_observed_at, last_observed_at, removed_at) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, NULL) ON CONFLICT(cve_id) DO UPDATE SET source_run_id=excluded.source_run_id, active=1, date_added=excluded.date_added, due_date=excluded.due_date, required_action=excluded.required_action, known_ransomware_campaign_use=excluded.known_ransomware_campaign_use, entry_hash=excluded.entry_hash, source_url=excluded.source_url, last_observed_at=excluded.last_observed_at, removed_at=NULL").bind(entry.cveId, runId, entry.dateAdded, entry.dueDate, sanitizeText(entry.requiredAction) ?? entry.requiredAction, entry.knownRansomwareCampaignUse ?? null, entryHash, snapshot.sourceUrl, now, now));
+        statements.push(db.prepare("INSERT INTO cves (id, created_at, updated_at) VALUES (?, ?, ?) ON CONFLICT DO NOTHING").bind(entry.cveId, now, now));
+        statements.push(db.prepare("INSERT INTO kev_entries (cve_id, source_run_id, active, date_added, due_date, required_action, known_ransomware_campaign_use, entry_hash, source_url, first_observed_at, last_observed_at, removed_at) VALUES (?, ?, TRUE, ?, ?, ?, ?, ?, ?, ?, ?, NULL) ON CONFLICT(cve_id) DO UPDATE SET source_run_id=excluded.source_run_id, active=TRUE, date_added=excluded.date_added, due_date=excluded.due_date, required_action=excluded.required_action, known_ransomware_campaign_use=excluded.known_ransomware_campaign_use, entry_hash=excluded.entry_hash, source_url=excluded.source_url, last_observed_at=excluded.last_observed_at, removed_at=NULL").bind(entry.cveId, runId, entry.dateAdded, entry.dueDate, sanitizeText(entry.requiredAction) ?? entry.requiredAction, entry.knownRansomwareCampaignUse ?? null, entryHash, snapshot.sourceUrl, now, now));
         statements.push(db.prepare("INSERT INTO exploit_evidence (id, cve_id, advisory_id, source_id, evidence_type, status, evidence_date, evidence_url, summary, first_observed_at, last_observed_at) VALUES (?, ?, NULL, 'cisa-kev', 'known_exploitation', 'confirmed', ?, ?, ?, ?, ?) ON CONFLICT(cve_id, source_id, evidence_type, evidence_url) DO UPDATE SET status='confirmed', evidence_date=excluded.evidence_date, summary=excluded.summary, last_observed_at=excluded.last_observed_at").bind(`${entry.cveId}:cisa-kev`, entry.cveId, entry.dateAdded, snapshot.sourceUrl, `CISA KEV: ${sanitizeText(entry.vulnerabilityName) ?? entry.vulnerabilityName}`, now, now));
       }
       for (const changeType of changeTypes) statements.push(db.prepare("INSERT INTO intelligence_changes (id, source_run_id, entity_type, entity_id, cve_id, change_type, observed_at, before_json, after_json, summary) VALUES (?, ?, 'kev_entry', ?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), runId, entry.cveId, entry.cveId, changeType, now, previous ? JSON.stringify({ dueDate: previous.due_date, entryHash: previous.entry_hash }) : null, JSON.stringify({ dueDate: entry.dueDate, entryHash }), changeType === "KEV_ADDED" ? `${entry.cveId} added to CISA KEV` : changeType === "KEV_DEADLINE_CHANGED" ? `${entry.cveId} KEV deadline changed` : `${entry.cveId} KEV entry revised`));
     }
     for (const [cveId, previous] of existing) if (previous.active && !seen.has(cveId)) {
       counts.changed += 1;
-      statements.push(db.prepare("UPDATE kev_entries SET active=0, removed_at=?, last_observed_at=?, source_run_id=? WHERE cve_id=?").bind(now, now, runId, cveId));
+      statements.push(db.prepare("UPDATE kev_entries SET active=FALSE, removed_at=?, last_observed_at=?, source_run_id=? WHERE cve_id=?").bind(now, now, runId, cveId));
       statements.push(db.prepare("INSERT INTO intelligence_changes (id, source_run_id, entity_type, entity_id, cve_id, change_type, observed_at, before_json, after_json, summary) VALUES (?, ?, 'kev_entry', ?, ?, 'KEV_REMOVED', ?, ?, ?, ?)").bind(crypto.randomUUID(), runId, cveId, cveId, now, JSON.stringify({ active: true }), JSON.stringify({ active: false }), `${cveId} removed from current CISA KEV snapshot`));
     }
     for (let index = 0; index < statements.length; index += 75) await db.batch(statements.slice(index, index + 75));
@@ -85,6 +88,7 @@ export async function ingestCisaKev(db: D1Database, idempotencyKey?: string): Pr
     const status = counts.inserted + counts.changed > 0 ? "success" : "unchanged";
     await repository.finishRun(runId, { status, ...runFields, counts, errors: [] });
     return { sourceId: "cisa-kev", runId, status, ...runFields, counts, errors: [], startedAt, completedAt: new Date().toISOString() };
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : "CISA KEV ingestion failed";
     const counts = { ...empty, failed: 1 };

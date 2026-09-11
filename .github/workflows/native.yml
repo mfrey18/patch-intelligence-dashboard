@@ -1,0 +1,76 @@
+name: Validate and deploy native API
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: production-deployment
+  cancel-in-progress: false
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: integration-only
+          POSTGRES_DB: patch_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgresql://postgres:integration-only@127.0.0.1:5432/patch_test
+      VITE_API_BASE_URL: https://example.ts.net
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v4
+        with: { version: 10 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 24, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck && pnpm lint && pnpm test && pnpm pages:build && pnpm test:pages
+      - run: shellcheck ops/*.sh
+  deploy:
+    permissions:
+      contents: read
+      id-token: write
+    needs: validate
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && vars.ENABLE_NATIVE_DEPLOYMENT == 'true'
+    environment: production-native
+    runs-on: ubuntu-latest
+    env:
+      DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+      DEPLOY_USER: ${{ vars.DEPLOY_USER }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ vars.TS_OIDC_CLIENT_ID }}
+          audience: ${{ vars.TS_AUDIENCE }}
+          tags: tag:patch-ci
+      - name: Configure pinned SSH identity
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          umask 077
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          [[ "$DEPLOY_HOST" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]+$ ]]
+          [[ "$DEPLOY_USER" =~ ^[a-zA-Z_][a-zA-Z0-9_-]+$ ]]
+      - name: Transfer tested release
+        run: |
+          git archive --format=tar.gz -o "$RUNNER_TEMP/$GITHUB_SHA.tar.gz" "$GITHUB_SHA"
+          scp "$RUNNER_TEMP/$GITHUB_SHA.tar.gz" "$DEPLOY_USER@$DEPLOY_HOST:/Library/PatchIntelligence/incoming/$GITHUB_SHA.tar.gz"
+      - name: Migrate, restart, and check local readiness
+        run: ssh "$DEPLOY_USER@$DEPLOY_HOST" "sudo -n /Library/PatchIntelligence/ops/deploy-release.sh $GITHUB_SHA"
+      - name: Check production cutover gates
+        if: vars.DATABASE_BACKEND == 'postgres'
+        env:
+          PRIVATE_API_BASE_URL: ${{ vars.PRIVATE_API_BASE_URL }}
+          INGEST_SECRET: ${{ secrets.INGEST_SECRET }}
+        run: node scripts/cutover-check.mjs

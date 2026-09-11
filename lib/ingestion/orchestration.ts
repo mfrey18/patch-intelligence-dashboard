@@ -1,3 +1,4 @@
+import type { Database } from "../../db/database";
 import type { IngestionMode, IngestResult } from "./contracts";
 import { defaultDeltaStart, INGESTION_MODES, rollingWindowStart, windowDaysForSource } from "./operational-policy";
 
@@ -43,7 +44,7 @@ export function normalizeIngestionRequest(sourceId: string, request: IngestionRe
   return { id: checkpointId, sourceId, mode, coverageStart: coverageStart.toISOString(), coverageEnd: coverageEnd.toISOString(), windowStart: coverageStart.toISOString(), windowEnd: windowEnd.toISOString() };
 }
 
-export async function loadOrCreateCheckpoint(db: D1Database, sourceId: string, request: IngestionRequest, now = new Date()): Promise<IngestionCheckpoint> {
+export async function loadOrCreateCheckpoint(db: Database, sourceId: string, request: IngestionRequest, now = new Date()): Promise<IngestionCheckpoint> {
   if (request.checkpointId) {
     const existing = await db.prepare("SELECT id, source_id, mode, coverage_start, coverage_end, window_start, window_end, continuation_token, status FROM ingestion_checkpoints WHERE id=?").bind(request.checkpointId).first<Record<string, unknown>>();
     if (existing) {
@@ -74,15 +75,15 @@ export async function loadOrCreateCheckpoint(db: D1Database, sourceId: string, r
   return checkpointFromRow(row);
 }
 
-export async function markCheckpointRunning(db: D1Database, checkpointId: string): Promise<void> {
+export async function markCheckpointRunning(db: Database, checkpointId: string): Promise<void> {
   await db.prepare("UPDATE ingestion_checkpoints SET status='running', last_error=NULL, updated_at=? WHERE id=? AND status<>'complete'").bind(new Date().toISOString(), checkpointId).run();
 }
 
-export async function markCheckpointFailed(db: D1Database, checkpointId: string, error: string): Promise<void> {
+export async function markCheckpointFailed(db: Database, checkpointId: string, error: string): Promise<void> {
   await db.prepare("UPDATE ingestion_checkpoints SET status='failed', last_error=?, updated_at=? WHERE id=? AND status<>'complete'").bind(error.slice(0, 2000), new Date().toISOString(), checkpointId).run();
 }
 
-export async function advanceCheckpoint(db: D1Database, checkpoint: IngestionCheckpoint, result: IngestResult): Promise<IngestionCheckpoint> {
+export async function advanceCheckpoint(db: Database, checkpoint: IngestionCheckpoint, result: IngestResult): Promise<IngestionCheckpoint> {
   const now = new Date().toISOString();
   if (result.counts.failed > 0 || result.status === "failed") {
     await db.prepare("UPDATE ingestion_checkpoints SET status='failed', last_run_id=?, last_error=?, updated_at=? WHERE id=?").bind(result.runId, result.errors.join(" | ").slice(0, 2000) || "Source batch failed", now, checkpoint.id).run();
@@ -105,7 +106,7 @@ export async function advanceCheckpoint(db: D1Database, checkpoint: IngestionChe
 }
 
 export function checkpointBatchKey(checkpoint: IngestionCheckpoint, requestedCheckpointId?: string): string {
-  // D1 keeps one canonical checkpoint for a source/mode/range. A newly named
+  // PostgreSQL keeps one canonical checkpoint for a source/mode/range. A newly named
   // deterministic replay can therefore reopen that canonical row, but it must
   // not reuse the prior replay's successful source_runs. Scope only that case
   // to the caller's validated checkpoint identifier; normal resumptions retain

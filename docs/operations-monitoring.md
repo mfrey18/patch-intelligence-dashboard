@@ -1,3 +1,5 @@
+> Historical Cloudflare/D1 runbook. For the active PostgreSQL deployment, use [native host operations](postgresql-native.md).
+
 # Production operations monitoring
 
 The immediate post-deployment monitoring layer is intentionally bounded for Cloudflare Workers Free and keeps Cloudflare management credentials out of the Worker.

@@ -1,0 +1,19 @@
+// Merge into the existing policy; do not overwrite other devices' rules.
+// Replace PATCH_ADMIN_EMAIL with the designated administrator's tailnet identity.
+{
+  "groups": { "group:patch-admins": ["PATCH_ADMIN_EMAIL"] },
+  "tagOwners": {
+    "tag:patch-host": ["group:patch-admins"],
+    "tag:patch-ci": ["group:patch-admins"]
+  },
+  "grants": [
+    { "src": ["group:patch-admins"], "dst": ["tag:patch-host"], "ip": ["tcp:22", "tcp:5432", "tcp:8443"] },
+    { "src": ["tag:patch-ci"], "dst": ["tag:patch-host"], "ip": ["tcp:22", "tcp:8443"] }
+  ],
+  "nodeAttrs": [{ "target": ["tag:patch-host"], "attr": ["funnel"] }],
+  "tests": [{
+    "src": "tag:patch-ci",
+    "accept": ["tag:patch-host:8443"],
+    "deny": ["tag:patch-host:5432"]
+  }]
+}

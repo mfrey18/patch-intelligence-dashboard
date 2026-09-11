@@ -1,3 +1,5 @@
+> Historical Cloudflare/D1 runbook. For the active PostgreSQL deployment, use [native host operations](postgresql-native.md).
+
 # GitHub Pages + Cloudflare deployment
 
 The GitHub Pages build is a static React client. It calls the public read-only API hosted by the Cloudflare Worker. D1, source credentials, and the authenticated ingestion endpoint remain on Cloudflare.

@@ -74,15 +74,10 @@ test("batch pressure alerts target unresolved operational checkpoints", async ()
 test("operational thresholds and daily monitoring workflow are explicit", () => {
   assert.deepEqual(OPERATIONAL_THRESHOLDS, { projectionStaleHours: 36, sourceStaleHours: 36, coreLatencyMs: 1000, repeatedBoundHits24h: 3, repeatedFailures24h: 3, leaseStuckMinutes: 8 });
   const workflow = readFileSync(new URL("../.github/workflows/operations-monitor.yml", import.meta.url), "utf8");
-  assert.match(workflow, /api\/internal\/monitor/);
-  assert.match(workflow, /databaseWarningBytes:400000000/);
-  assert.match(workflow, /rowsReadWarning24h:4000000/);
-  assert.match(workflow, /rowsWrittenWarning24h:80000/);
-  assert.match(workflow, /d1_rows_read_pressure/);
-  assert.match(workflow, /d1_rows_written_pressure/);
-  assert.match(workflow, /status != "unhealthy"/);
-  assert.match(workflow, /issues: write/);
-  assert.match(workflow, /Publish or resolve production alert/);
+  assert.match(workflow, /scripts\/cutover-check.mjs/);
+  assert.match(workflow, /tailscale\/github-action/);
+  assert.match(workflow, /PRIVATE_API_BASE_URL/);
+  assert.doesNotMatch(workflow, /issues: write/);
   for (const code of ["source_stale", "source_repeated_failures", "projection_behind_ingestion", "projection_parity_unverified", "ingestion_lease_expired", "source_repeated_bound_hits", "dashboard_core_slow"]) assert.match(readFileSync(new URL("../lib/operations/operational-monitor.ts", import.meta.url), "utf8"), new RegExp(code));
   assert.doesNotMatch(workflow, /localhost/);
 });

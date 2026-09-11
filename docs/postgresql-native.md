@@ -1,0 +1,51 @@
+# PostgreSQL host operations
+
+The public site stays on GitHub Pages. PostgreSQL and both API listeners run on the Mac. Funnel publishes only the read-only listener. Database administration and ingestion use private Tailscale Serve ports. Production D1 is retained as a rollback asset; no historical rows are imported.
+
+## One-time host setup
+
+1. In Terminal, review and accept the Xcode license with `sudo xcodebuild -license accept`. Install dependencies with `brew install postgresql@18 node@24 tailscale`.
+2. Run `sudo python3 ops/install-native.py` from the reviewed checkout. The installer downloads pinned pnpm 10.34.5 as the service account and initializes `/Library/PatchIntelligence`, `_patchdb` and `_patchapp`, PostgreSQL roles, loopback-only networking, local backup jobs, and the system `tailscaled`. Quit the old GUI Tailscale client first. Existing secrets are never overwritten by a rerun.
+3. Edit `/Library/PatchIntelligence/secrets/api.env` locally to provide Cisco and any optional vendor credentials. Keep the file owned by `_patchapp`, mode 600; keep migration and PostgreSQL service credentials root-owned mode 600. Never paste secrets into logs, PRs, or browser configuration.
+4. Authenticate the system `tailscale` client, tag the host `tag:patch-host`, and enable MagicDNS and HTTPS. Merge `ops/tailnet-policy.hujson` into the existing tailnet policy after replacing `PATCH_ADMIN_EMAIL`. Remove any broader grants that would also allow unauthorized devices to access this host: Tailscale grants are additive. Apply the included CI database-denial policy test.
+5. Run `sudo python3 ops/install-deployment-access.py` from the reviewed checkout. This creates `_patchdeploy` with a dedicated group, a forced-command SSH key, incoming-directory access, and a SHA-only sudoers rule for the root-owned deployment helper. The key permits SFTP uploads and that helper; interactive shells and forwarding are disabled. The helper validates archive paths and metadata, installs dependencies as `_patchapp`, applies migrations, then switches releases. The installer preserves existing SSH settings and enables Remote Login; macOS may require Terminal Full Disk Access to enable it. It writes `/Library/PatchIntelligence/secrets/github-setup.json`, readable only by the invoking Mac user, containing the deployment key, pinned host key and native ingestion token for GitHub setup. Never print or commit this file. Treat the key as production deployment authority; never expose it to pull-request jobs.
+6. Configure GitHub environment `production-native` and restrict it to protected `main`. Set `DEPLOY_HOST`, `DEPLOY_USER`, and secrets `DEPLOY_SSH_KEY`, `DEPLOY_KNOWN_HOSTS`. Use a Tailscale OpenID Connect trust credential with GitHub issuer, subject `repo:mfrey18/patch-intelligence-dashboard:environment:production-*`, custom claim `ref=refs/heads/main`, and only `auth_keys` write scope for `tag:patch-ci`. Set its non-secret `TS_OIDC_CLIENT_ID` and `TS_AUDIENCE` as variables in both protected production environments. GitHub jobs request short-lived identity tokens; no Tailscale client secret is stored. Restrict both environments to branch `main`. The CI tag can reach SSH and private API, not port 5432.
+7. Set `ENABLE_NATIVE_DEPLOYMENT=true` to deploy the validated `main` release. Leave `DATABASE_BACKEND` unset until cutover. The existing ingestion workflow keeps calling the old public Worker API until that variable becomes `postgres`.
+
+For an initial local release, archive a reviewed committed SHA using `git archive --format=tar.gz`, place it in the incoming directory as `<SHA>.tar.gz`, then run `sudo /Library/PatchIntelligence/ops/deploy-release.sh <SHA>`. The helper does not ingest data automatically. DDL migrations are forward-only; every later production migration must remain compatible with the previous release until its rollback window expires.
+
+For the prepared follow-up on an already initialized host, run `sudo python3 ops/apply-followups.py --release <SHA> --archive <archive-path> --sha256 <archive-checksum>`. It validates the pinned archive, takes a backup, deploys, compares the product results and records uncached analytics latency, then installs restricted deployment access and starts maintenance/bootstrap. A product mismatch restores the previous application release before ingestion starts. Reports are saved under `/Library/PatchIntelligence/logs/followups-*.json`. A failed release directory is retained for inspection; an administrator must review it before retrying the same revision.
+
+## Initialization and cutover
+
+- Run `sudo python3 ops/continue-setup.py` from the reviewed checkout to apply host maintenance and start a bounded background bootstrap. Progress is written to `/Library/PatchIntelligence/logs/com.patch.bootstrap.log`. It resumes existing checkpoints, continues past missing Cisco credentials, and refreshes KEV/EPSS against the newly tracked CVEs. Bootstrap exits 2 when follow-up remains. It does not repeat automatically after reboot. RSS source coverage can remain limited by upstream history; checkpoint completion alone is not a historical completeness claim.
+- Run one ordinary delta for each of the six production sources after backfill, then refresh the projection. Current KEV and EPSS snapshots are imported; previous revisions and historical EPSS are not reconstructed. Record actual earliest/latest source coverage and all skipped/unavailable feed history.
+- Run `sudo /Library/PatchIntelligence/ops/backup.sh` and `sudo /Library/PatchIntelligence/ops/restore-test.sh`.
+- Run the reviewed `ops/configure-tailscale.sh` against the system CLI. Confirm Funnel 443 targets only port 3001; Serve 8443 targets 3002; private TCP 5432 forwards to PostgreSQL. Do not reset existing unrelated Serve configuration.
+- Set `PRIVATE_API_BASE_URL=https://<host>.<tailnet>.ts.net:8443` in GitHub's `production-ingestion` and `production-native` environments, along with the host's ingestion token named `NATIVE_INGEST_SECRET` in `production-ingestion` and `INGEST_SECRET` in `production-native`. Preserve the old `INGEST_SECRET` in the ingestion environment/repository until rollback is no longer needed; workflows select the token according to `DATABASE_BACKEND`. Set the repository `PUBLIC_API_BASE_URL=https://<host>.<tailnet>.ts.net` only for cutover.
+- Run `scripts/cutover-check.mjs` from an authorized tailnet device with the private origin and ingestion secret. It requires six fresh sources, passing parity, nonempty projection, under-one-second local core latency, current backup and restore markers, and 5 GiB disk headroom. With `PUBLIC_API_BASE_URL` supplied it also checks public reachability and internal-route exclusion.
+- Test public access from a device outside the tailnet, and denied database access from an unauthorized tailnet device. Measure a representative Funnel workload; local fixture timings do not establish production performance.
+- Preserve the previous Pages artifact, Worker version, D1 identity, API origin and workflow variables. Pause scheduling briefly, set `DATABASE_BACKEND=postgres`, switch the public origin, deploy Pages from the same tested release, then resume schedules. Existing Worker/D1 data remains intact; no deletion is included.
+- Observe seven daily cycles. Record source freshness, query latency, backup success, disk headroom and restart behavior. The daily GitHub monitor fails visibly when the Mac is unreachable; it does not send unsolicited messages or create issues.
+
+## Availability and maintenance
+
+Use `launchctl print system/com.patch.api` and `launchctl print system/com.patch.postgres` for status. Logs are in `/Library/PatchIntelligence/logs`; the installer configures daily copy/truncate rotation with seven compressed archives per log. This retains launchd file descriptors without restarting services, with a small concurrent-write window in which log lines may be lost. Restart the API with `sudo launchctl kickstart -k system/com.patch.api`.
+
+Keep system sleep disabled on AC (`sudo pmset -c sleep 0`) while leaving display sleep enabled. Enable automatic power recovery where supported. Reboot and verify PostgreSQL, API, and Tailscale return before declaring this an unattended host. FileVault may require a physical unlock after a cold boot; preserve encryption and document that recovery requirement.
+
+Daily backups run at 03:00 host local time, retain 14 days, and use custom-format PostgreSQL dumps with SHA-256 checksums. Monthly restore tests run on day 1 at 04:00 into a uniquely named temporary database that is removed afterward. Backup freshness and the latest successful restore appear in private health output. These local backups do not protect against device loss. Keep at least 5 GiB free disk and investigate growing database/log files.
+
+The database itself listens only on loopback. An authorized remote SQL client connects to `<host>.<tailnet>.ts.net:5432` using its assigned PostgreSQL credentials. WireGuard encrypts the network hop; the local forward remains on loopback. Do not expose database port 5432 through Funnel or a router port-forward.
+
+## Rollback
+
+Restore the previous Pages artifact and public Worker API origin, set `DATABASE_BACKEND` back to its previous value, and resume the old ingestion schedule. Keep PostgreSQL intact for investigation. Data acquired only after the PostgreSQL cutover will not appear in D1 without a separate replay/import. The previous Cloudflare workflow is archived under `ops/legacy`; use its pre-migration Git commit for any Worker redeployment, never the native checkout.
+
+For application-only rollback on the Mac, switch `current` to the previous immutable release and restart the API. Do not roll back schema blindly; restore a verified dump into a separate database when a database rollback is needed.
+
+## Verification
+
+`pnpm typecheck`, `pnpm lint`, `pnpm test`, `VITE_API_BASE_URL=https://example.ts.net pnpm pages:build`, and `VITE_API_BASE_URL=https://example.ts.net pnpm test:pages`.
+
+Set `TEST_DATABASE_URL` to a disposable PostgreSQL database whose name ends in `_test` to run driver/permission/concurrency checks. Tests reset its public schema. Without that variable, SQL tests run on embedded PGlite; the TCP permission test is explicitly skipped. CI always uses PostgreSQL 18 with the real `pg` driver.
