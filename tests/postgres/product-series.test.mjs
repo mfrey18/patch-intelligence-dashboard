@@ -20,7 +20,7 @@ test('product series uses current revisions, expands advisory-wide products and 
       await db.prepare(`INSERT INTO advisories(id,vendor_id,source_id,vendor_advisory_id,title,source_url,published_at,created_at,updated_at)
         VALUES (?,?,?,?,?,'https://vendor.example/advisory',now(),now(),now())`).bind(id, vendor, source, 'advisory:' + id, 'Advisory ' + id).run();
       for (const index of linked) {
-        await db.prepare("INSERT INTO advisory_cves(advisory_id,cve_id,normalized_severity) VALUES (?,?,'high')").bind(id, cves[index]).run();
+        await db.prepare('INSERT INTO advisory_cves(advisory_id,cve_id,normalized_severity) VALUES (?,?,?)').bind(id, cves[index], index === 0 ? 'critical' : 'high').run();
       }
     }
     for (const [id, advisory, age] of [
@@ -65,6 +65,7 @@ test('product series uses current revisions, expands advisory-wide products and 
     assert.deepEqual(Object.fromEntries((await products('vendor=microsoft')).map(row => [row.label, row.value])), { Alpha: 2, Beta: 1, alpha: 1, Zeta: 1 });
     assert.deepEqual(await products('vendor=palo-alto'), [{ label: 'Delta', value: 2 }, { label: 'Alpha', value: 1 }]);
     assert.deepEqual(Object.fromEntries((await products('q=CVE-2026-1003')).map(row => [row.label, row.value])), { Alpha: 1, Delta: 1 });
+    assert.deepEqual(Object.fromEntries((await products('severity=critical')).map(row => [row.label, row.value])), { Alpha: 1, alpha: 1, Zeta: 1 });
     assert.deepEqual(await products('q=no-matching-cve'), []);
 
     // Release families also count CVEs once across duplicated versions,
@@ -90,13 +91,14 @@ test('product series uses current revisions, expands advisory-wide products and 
     for (const [index, cve] of cves.entries()) {
       const vendors = index === 0 ? '|microsoft|' : index === 1 ? '|microsoft|palo-alto|' : '|palo-alto|';
       await db.prepare(`INSERT INTO cve_dashboard_facts(cve_id,title,vendor,vendor_ids,severity_rank,kev,known_exploited,zero_day,mitigation_available,workaround_available,priority,projected_at)
-        VALUES (?,?,'Microsoft, Palo Alto',?,3,FALSE,FALSE,FALSE,FALSE,FALSE,'P3',now())`).bind(cve, cve, vendors).run();
+        VALUES (?,?,'Microsoft, Palo Alto',?,?,FALSE,FALSE,FALSE,FALSE,FALSE,'P3',now())`).bind(cve, cve, vendors, index === 0 ? 4 : 3).run();
     }
     await db.prepare("INSERT INTO dashboard_projection_state(id,projection_version,generated_at,cve_count,status) VALUES ('current',1,now(),3,'published')").run();
     assert.deepEqual(await products(), canonical);
     assert.deepEqual(Object.fromEntries((await products('vendor=microsoft')).map(row => [row.label, row.value])), { Alpha: 2, Beta: 1, alpha: 1, Zeta: 1 });
     assert.deepEqual(await products('vendor=palo-alto'), [{ label: 'Delta', value: 2 }, { label: 'Alpha', value: 1 }]);
     assert.deepEqual(Object.fromEntries((await products('q=CVE-2026-1003')).map(row => [row.label, row.value])), { Alpha: 1, Delta: 1 });
+    assert.deepEqual(Object.fromEntries((await products('severity=critical')).map(row => [row.label, row.value])), { Alpha: 1, alpha: 1, Zeta: 1 });
     for (let index = 1; index <= 14; index++) {
       const label = 'Limit' + String(index).padStart(2, '0');
       await db.prepare("INSERT INTO products(id,vendor_id,name,created_at,updated_at) VALUES (?,'palo-alto',?,now(),now())").bind(label, label).run();
