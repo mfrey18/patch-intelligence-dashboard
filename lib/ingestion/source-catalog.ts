@@ -9,7 +9,7 @@ export interface SourceCatalogEntry {
   requiresConfiguration?: boolean;
 }
 
-/** Central source identity/provenance catalog shared by D1 seeding and dispatch. */
+/** Central source identity/provenance catalog shared by database seeding and dispatch. */
 export const SOURCE_CATALOG = [
   { id: "microsoft-msrc-csaf", vendorId: "microsoft", name: "Microsoft MSRC CSAF", kind: "vendor_advisory", discoveryUrl: "https://api.msrc.microsoft.com/csaf/advisories/changes.csv" },
   { id: "cisco-psirt-csaf", vendorId: "cisco", name: "Cisco PSIRT OpenVuln + CSAF", kind: "vendor_advisory", discoveryUrl: "https://apix.cisco.com/security/advisories/v2/all/lastpublished", requiresConfiguration: true },
