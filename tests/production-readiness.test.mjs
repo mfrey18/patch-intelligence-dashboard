@@ -225,7 +225,7 @@ test("Patch Tuesday totals retain Microsoft release-note provenance separately f
   assert.match(query, /totalBasis: reported == null \? "linked_advisories" : "vendor_reported"/);
   assert.match(query, /reconciliationStatus/);
   assert.match(dashboard, /Microsoft-reported CVEs/);
-  assert.match(dashboard, /Successfully linked in PostgreSQL/);
+  assert.match(dashboard, /label="Linked CVEs"/);
   assert.match(dashboard, /Linked CVEs drive severity, threat, and product metrics/);
 });
 
