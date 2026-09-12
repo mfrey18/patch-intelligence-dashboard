@@ -5,11 +5,15 @@ on:
     workflows: ["Validate and deploy native API"]
     types: [completed]
   workflow_dispatch:
+    inputs:
+      native_run_id:
+        description: Successful native deployment run for this exact main commit
+        required: true
+        type: string
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
+  actions: read
 
 concurrency:
   group: production-deployment
@@ -17,9 +21,20 @@ concurrency:
 
 jobs:
   build:
-    if: vars.DATABASE_BACKEND == 'postgres' && vars.ENABLE_NATIVE_DEPLOYMENT == 'true' && (github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main'))
+    permissions:
+      contents: read
+      actions: read
+      pages: read
+    if: vars.DATABASE_BACKEND == 'postgres' && vars.ENABLE_NATIVE_DEPLOYMENT == 'true' && ((github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main'))
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v6
+      - name: Require successful native deployment of the selected Pages commit
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ github.event.workflow_run.id || inputs.native_run_id }}
+          SOURCE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+        run: node scripts/pages-release-guard.mjs native
       - uses: actions/checkout@v6
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
@@ -53,8 +68,13 @@ jobs:
       - uses: actions/upload-pages-artifact@v4
         with:
           path: dist-pages
+          retention-days: 30
 
   deploy:
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -68,7 +88,7 @@ jobs:
         env:
           PAGE_URL: ${{ steps.deployment.outputs.page_url }}
         run: |
-          for attempt in 1 2 3 4 5; do
+          for _attempt in 1 2 3 4 5; do
             if curl --fail --silent --show-error "$PAGE_URL" | grep -q 'Vulnerability Intelligence'; then exit 0; fi
             sleep 5
           done
