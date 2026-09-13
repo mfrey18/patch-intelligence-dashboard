@@ -6,29 +6,62 @@ export function sanitizeText(value: unknown): string | undefined {
   return plain || undefined;
 }
 
-export async function fetchWithPolicy(url: string, policy: SourcePolicy, init?: RequestInit, allowedStatuses: number[] = []): Promise<Response> {
-  let lastError: unknown;
-  for (let attempt = 0; attempt <= policy.retries; attempt += 1) {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), policy.timeoutMs);
-    try {
-      const response = await fetch(url, { ...init, redirect: "follow", signal: controller.signal });
-      if (!response.ok && !allowedStatuses.includes(response.status)) {
-        const retryable = response.status === 429 || response.status >= 500;
-        if (!retryable || attempt >= policy.retries) throw new Error(`Source returned HTTP ${response.status}`);
-        const retryAfter = Number(response.headers.get("retry-after") ?? 0);
-        await new Promise((resolve) => setTimeout(resolve, retryAfter > 0 ? Math.min(retryAfter * 1000, 30_000) : policy.retryBaseMs * 2 ** attempt));
-        continue;
-      }
-      const length = Number(response.headers.get("content-length") ?? 0);
-      if (length > policy.maxResponseBytes) throw new Error(`Source response exceeds ${policy.maxResponseBytes} bytes`);
-      return response;
-    } catch (error) {
-      lastError = error;
-      if (attempt < policy.retries) await new Promise((resolve) => setTimeout(resolve, policy.retryBaseMs * 2 ** attempt));
-    } finally { clearTimeout(timeout); }
+export interface FetchPolicyRuntime {
+  fetch?: typeof fetch;
+  now?: () => number;
+  sleep?: (milliseconds: number) => Promise<void>;
+  schedule?: (request: () => Promise<Response>) => Promise<Response>;
+}
+
+export class SourceHttpError extends Error {
+  constructor(readonly status: number, readonly retryAt?: number) {
+    super(`Source returned HTTP ${status}${retryAt ? `; retry after ${new Date(retryAt).toISOString()}` : ""}`);
   }
-  throw lastError instanceof Error ? lastError : new Error("Source fetch failed");
+}
+
+/** Retry-After can be delay-seconds or an HTTP date. Never shorten a valid deadline. */
+export function retryAfterDeadline(value: string | null, now: number): number | undefined {
+  if (!value?.trim()) return undefined;
+  const header = value.trim();
+  const deadline = /^\d+(?:\.\d+)?$/.test(header) ? now + Number(header) * 1000 : Date.parse(header);
+  return Number.isFinite(deadline) && !Number.isNaN(new Date(deadline).getTime()) && deadline >= now ? deadline : undefined;
+}
+
+export async function fetchWithPolicy(url: string, policy: SourcePolicy, init?: RequestInit, allowedStatuses: number[] = [], runtime: FetchPolicyRuntime = {}): Promise<Response> {
+  const now = runtime.now ?? Date.now;
+  const sleep = runtime.sleep ?? ((milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
+  const retryable = (status: number) => status === 429 || status >= 500;
+  for (let attempt = 0; attempt <= policy.retries; attempt += 1) {
+    let response: Response;
+    try {
+      const request = async () => {
+        // Scheduling wait is separate from the network request timeout.
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), policy.timeoutMs);
+        try { return await (runtime.fetch ?? fetch)(url, { ...init, redirect: "follow", signal: controller.signal }); }
+        finally { clearTimeout(timeout); }
+      };
+      response = await (runtime.schedule ? runtime.schedule(request) : request());
+    } catch (error) {
+      if (attempt >= policy.retries || (error instanceof SourceHttpError && (!retryable(error.status) || (error.retryAt ?? 0) - now() > 30_000))) throw error;
+      const wait = Math.max(policy.retryBaseMs * 2 ** attempt, error instanceof SourceHttpError ? (error.retryAt ?? 0) - now() : 0);
+      await sleep(wait);
+      continue;
+    }
+    if (!response.ok && !allowedStatuses.includes(response.status)) {
+      const retryAt = retryAfterDeadline(response.headers.get("retry-after"), now());
+      const error = new SourceHttpError(response.status, retryAt);
+      await response.body?.cancel();
+      // Long cooldowns remain resumable. Do not clamp them and retry prematurely.
+      if (!retryable(response.status) || attempt >= policy.retries || (retryAt ?? 0) - now() > 30_000) throw error;
+      await sleep(Math.max(policy.retryBaseMs * 2 ** attempt, (retryAt ?? 0) - now()));
+      continue;
+    }
+    const length = Number(response.headers.get("content-length") ?? 0);
+    if (length > policy.maxResponseBytes) { await response.body?.cancel(); throw new Error(`Source response exceeds ${policy.maxResponseBytes} bytes`); }
+    return response;
+  }
+  throw new Error("Source fetch failed");
 }
 
 export async function readJsonLimited(response: Response, maxBytes: number): Promise<unknown> {

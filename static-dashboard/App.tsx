@@ -9,7 +9,7 @@ import { demoDashboard } from "../lib/demo-data";
 import { isVendorId, parseComparisonCves, vendorLabel } from "../lib/domain/routes";
 
 const configuredApiBase = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, "") ?? "";
-const apiBaseUrl = configuredApiBase || (import.meta.env.DEV ? "http://localhost:3000" : "");
+const apiBaseUrl = configuredApiBase || (import.meta.env.DEV ? "http://127.0.0.1:3001" : "");
 
 export function App() {
   const [hash, setHash] = useState(() => window.location.hash);
@@ -33,7 +33,7 @@ export function App() {
   }, [comparisonCves, cveId, patchTuesdayArchive, sourceHealth, vendorId]);
 
   if (!apiBaseUrl) {
-    return <main className="detailState"><h1>API configuration required</h1><p>Set the GitHub repository variable PUBLIC_API_BASE_URL to the deployed Cloudflare Worker origin, then run the Pages workflow again.</p></main>;
+    return <main className="detailState"><h1>API configuration required</h1><p>Set the GitHub repository variable PUBLIC_API_BASE_URL to the public API origin, then run the Pages workflow again.</p></main>;
   }
 
   if (cveId) return <CveDetailClient cveId={cveId} apiBaseUrl={apiBaseUrl} backHref="#/" />;

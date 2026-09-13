@@ -1,0 +1,6 @@
+{
+  "name": "patch-public-browser-smoke",
+  "private": true,
+  "type": "module",
+  "dependencies": { "@playwright/test": "1.63.0" }
+}

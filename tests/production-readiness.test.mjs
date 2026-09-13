@@ -134,55 +134,19 @@ test("CVE provenance acceptance requires authoritative links, observations, and 
   assert.throws(() => assertCveProvenance({ ...detail, priority: { ...priority, components: { ...priority.components, kev: false } } }), /Priority KEV component/);
 });
 
-test("production workflows apply migrations before Worker deployment and serialize Pages afterward", async () => {
-  const worker = await readFile(new URL("../.github/workflows/cloudflare.yml", import.meta.url), "utf8");
-  const pages = await readFile(new URL("../.github/workflows/pages.yml", import.meta.url), "utf8");
-  const ingestion = await readFile(new URL("../.github/workflows/ingestion.yml", import.meta.url), "utf8");
-  const vite = await readFile(new URL("../vite.config.ts", import.meta.url), "utf8");
-  assert.ok(worker.indexOf("d1 migrations apply") < worker.indexOf("Deploy Worker and public assets"));
-  assert.ok(worker.indexOf("Deploy Worker and public assets") < worker.indexOf("Smoke-test Worker"));
-  assert.match(worker, /group: production-deployment/);
-  assert.match(worker, /environment:\s+name: production-worker/);
-  assert.match(worker, /wrangler d1 info .* --json/);
-  assert.match(worker, /actions\/upload-artifact@v4/);
-  assert.match(pages, /workflow_run:/);
-  assert.match(pages, /group: production-deployment/);
-  assert.match(ingestion, /ENABLE_SCHEDULED_INGESTION == 'true'/);
-  assert.match(ingestion, /fail-fast: false/);
-  assert.match(ingestion, /source: microsoft-msrc-csaf, max_attempts: 50/, "Microsoft must have enough resumable Worker invocations for the observed change volume");
-  assert.match(ingestion, /if \$checkpoint == "" then \{\} else \{checkpointId:\$checkpoint\} end/, "manual dispatch must omit blank checkpoint IDs");
-  assert.match(ingestion, /backfill:\$\{SOURCE_ID\}:six-month/, "backfills need a stable default checkpoint across workflow runs");
-  assert.match(ingestion, /test "\$MAX_ATTEMPTS" -ge 1 && test "\$MAX_ATTEMPTS" -le 50/, "manual orchestration must remain bounded");
-  assert.match(ingestion, /Checkpoint remains resumable/, "a bounded workflow run must preserve rather than fail valid partial progress");
-  assert.match(ingestion, /source: cisco-psirt-csaf, max_attempts: 4, batch_size: 1/, "Cisco must isolate each large CSAF document within its own Workers Free invocation");
-  assert.match(ingestion, /\[ "\$result_status" = "failed" \] \|\| \[ "\$result_status" = "skipped" \]/, "active or stuck source leases must not be reported as successful completion");
-  const dailyMatrix = ingestion.slice(ingestion.indexOf("matrix:"), ingestion.indexOf("name: Daily source"));
-  for (const source of ["microsoft-msrc-csaf", "cisco-psirt-csaf", "cisa-kev", "first-epss", "palo-alto-psirt-csaf", "mozilla-mfsa-yaml"]) assert.match(dailyMatrix, new RegExp(source));
-  for (const quarantined of ["adobe-psirt-csaf", "fortinet-psirt-csaf", "ivanti-security-advisory-rss", "oracle-cpu-csaf", "atlassian-vulnerability-api"]) assert.doesNotMatch(dailyMatrix, new RegExp(quarantined));
-  assert.doesNotMatch(ingestion, /sources:\s*\[[^\]]+,[^\]]+\]/, "each request must contain one source");
-  assert.doesNotMatch(vite, /limits:\s*\{/, "Workers Free deployments must use platform limits rather than paid-plan runtime limits");
-});
-
-test("D1 health uses supported Worker SQL and deployment-owned size discovery", async () => {
-  const health = await readFile(new URL("../lib/operations/d1-health.ts", import.meta.url), "utf8");
-  assert.doesNotMatch(health, /PRAGMA\s+(?:page_count|page_size)/i);
-  assert.match(health, /databaseSizeSource:\s*"wrangler_d1_info_required"/);
-  assert.match(health, /estimatedBytes:\s*null/);
-});
-
-test("large advisory components use atomic JSON-backed D1 bulk inserts", async () => {
-  const repository = await readFile(new URL("../lib/ingestion/d1-repository.ts", import.meta.url), "utf8");
-  assert.match(repository, /FROM json_each\(\?\)/);
-  assert.match(repository, /JSON\.stringify\(affectedRecords\)/);
-  assert.match(repository, /JSON\.stringify\(remediationRecords\)/);
-  assert.match(repository, /await this\.db\.batch\(queries\)/, "bulk inserts must remain in the advisory transaction");
-  assert.doesNotMatch(repository, /queries\.push\(this\.db\.prepare\("INSERT INTO affected_products/, "affected products must not create one RPC statement per assertion");
+test("native deployment validates before migrations and checks readiness", async () => {
+  const workflow = await readFile(new URL("../.github/workflows/native.yml", import.meta.url), "utf8");
+  const deploy = await readFile(new URL("../ops/deploy-release.sh", import.meta.url), "utf8");
+  assert.match(workflow, /needs: validate/);
+  assert.match(workflow, /environment: production-native/);
+  assert.ok(deploy.indexOf("scripts/migrate.ts") < deploy.indexOf("current.next"));
+  assert.match(deploy, /Readiness failed/);
 });
 
 test("advisory revision history permits a material A to B to A reversion", async () => {
   const schema = await readFile(new URL("../db/schema.ts", import.meta.url), "utf8");
   const migration = await readFile(new URL("../migrations/0003_allow_advisory_state_reversions.sql", import.meta.url), "utf8");
-  const repository = await readFile(new URL("../lib/ingestion/d1-repository.ts", import.meta.url), "utf8");
+  const repository = await readFile(new URL("../lib/ingestion/postgres-repository.ts", import.meta.url), "utf8");
 
   assert.match(schema, /index\("idx_advisory_revisions_advisory_hash"\)/);
   assert.doesNotMatch(schema, /uniqueIndex\("idx_advisory_revisions_advisory_hash"\)/);
@@ -192,15 +156,9 @@ test("advisory revision history permits a material A to B to A reversion", async
   assert.match(repository, /previous\?\.contentHash === hashes\.contentHash/, "consecutive identical source states must still be idempotent");
 });
 
-test("operations monitoring captures D1 capacity before enforcing the health gate", async () => {
-  const workflow = await readFile(new URL("../.github/workflows/operations-monitor.yml", import.meta.url), "utf8");
-  const capture = workflow.indexOf("Capture authenticated operational health");
-  const capacity = workflow.indexOf("Capture D1 capacity");
-  const publish = workflow.indexOf("Publish or resolve production alert");
-  const enforce = workflow.indexOf("Enforce production health gate");
-  assert.ok(capture >= 0 && capacity > capture && publish > capacity && enforce > publish);
-  assert.match(workflow, /databaseWarningBytes:400000000/);
-  assert.match(workflow, /dashboardCoreLatencyMs < 1000 and \.databaseBytes < \.databaseWarningBytes/);
+test("monitor enforces PostgreSQL backup and projection readiness", async () => {
+  const check = await readFile(new URL("../scripts/cutover-check.mjs", import.meta.url), "utf8");
+  assert.match(check, /backupStale/); assert.match(check, /lastRestoreAt/); assert.match(check, /parityStatus/);
 });
 
 test("retired deployment checkpoints are closed without touching operational backfill", async () => {
@@ -267,25 +225,22 @@ test("Patch Tuesday totals retain Microsoft release-note provenance separately f
   assert.match(query, /totalBasis: reported == null \? "linked_advisories" : "vendor_reported"/);
   assert.match(query, /reconciliationStatus/);
   assert.match(dashboard, /Microsoft-reported CVEs/);
-  assert.match(dashboard, /Successfully linked in D1/);
+  assert.match(dashboard, /label="Linked CVEs"/);
   assert.match(dashboard, /Linked CVEs drive severity, threat, and product metrics/);
 });
 
 test("Patch Tuesday membership excludes Microsoft VEX records and preserves release-note provenance", async () => {
   const microsoft = await readFile(new URL("../lib/ingestion/adapters/microsoft.ts", import.meta.url), "utf8");
-  const repository = await readFile(new URL("../lib/ingestion/d1-repository.ts", import.meta.url), "utf8");
+  const repository = await readFile(new URL("../lib/ingestion/postgres-repository.ts", import.meta.url), "utf8");
   const query = await readFile(new URL("../lib/api/dashboard-query.ts", import.meta.url), "utf8");
   const migration = await readFile(new URL("../migrations/0007_patch_tuesday_authoritative_membership.sql", import.meta.url), "utf8");
   assert.match(microsoft, /mayAssociateRelease.*documentType === "advisory"/s);
   assert.match(repository, /source_url=CASE WHEN excluded\.reported_cve_count IS NOT NULL/);
-  assert.match(query, /vendor_advisory_id LIKE 'advisory:%'[\s\S]*vendor_advisory_id LIKE 'release-membership:%'/);
+  assert.match(query, /vendor_advisory_id ILIKE 'advisory:%'[\s\S]*vendor_advisory_id ILIKE 'release-membership:%'/);
   assert.match(migration, /vendor_advisory_id` LIKE 'vex:%'/);
   assert.match(migration, /vendor_advisory_id` LIKE 'release-note:%'/);
   assert.match(migration, /UPDATE `sources`[\s\S]*'mozilla-mfsa-yaml'[\s\S]*THEN 1 ELSE 0 END/);
-  const deployment = await readFile(new URL("../.github/workflows/cloudflare.yml", import.meta.url), "utf8");
-  assert.doesNotMatch(deployment, /Refresh latest Microsoft release-note assertions|Validate one bounded Microsoft delta batch|checkpointId/, "production deployment must not create partial ingestion checkpoints");
-  assert.match(deployment, /reconciliationStatus != "overlinked"/);
-  assert.match(deployment, /productFamilyBasis == "vendor_reported"/);
+
 });
 
 test("production implementation no longer claims a 24-month scope", async () => {
@@ -301,9 +256,27 @@ test("gate documentation uses outcome-based release framing", async () => {
 });
 
 test("production dashboard failures remain fail closed and smoke tests reject demo data", async () => {
-  const worker = await readFile(new URL("../worker/index.ts", import.meta.url), "utf8");
-  const workflow = await readFile(new URL("../.github/workflows/cloudflare.yml", import.meta.url), "utf8");
+  const worker = await readFile(new URL("../server/api.ts", import.meta.url), "utf8");
+  const workflow = await readFile(new URL("../scripts/cutover-check.mjs", import.meta.url), "utf8");
   assert.match(worker, /dashboard_query_error/);
   assert.match(worker, /Dashboard intelligence is temporarily unavailable.*503/s);
-  assert.match(workflow, /\(\.demo \/\/ false\) == false and \.metrics\.total > 0/);
+  assert.match(workflow, /metrics\.total>0/);
+});
+
+test('native cutover selects a separate ingestion secret and preserves legacy rollback credentials', async () => {
+  const ingestion = await readFile(new URL('../.github/workflows/ingestion.yml', import.meta.url), 'utf8');
+  const monitor = await readFile(new URL('../.github/workflows/operations-monitor.yml', import.meta.url), 'utf8');
+  assert.match(ingestion, /secrets\[vars\.DATABASE_BACKEND == 'postgres' && 'NATIVE_INGEST_SECRET' \|\| 'INGEST_SECRET'\]/);
+  assert.doesNotMatch(ingestion, /secrets\.INGEST_SECRET/);
+  assert.match(monitor, /secrets\.NATIVE_INGEST_SECRET/);
+});
+
+test('native workflows use short-lived GitHub identity tokens for Tailscale', async () => {
+  for (const name of ['native', 'ingestion', 'operations-monitor']) {
+    const workflow = await readFile(new URL(`../.github/workflows/${name}.yml`, import.meta.url), 'utf8');
+    assert.match(workflow, /id-token: write/);
+    assert.match(workflow, /oauth-client-id: \$\{\{ vars\.TS_OIDC_CLIENT_ID \}\}/);
+    assert.match(workflow, /audience: \$\{\{ vars\.TS_AUDIENCE \}\}/);
+    assert.doesNotMatch(workflow, /oauth-secret:/);
+  }
 });

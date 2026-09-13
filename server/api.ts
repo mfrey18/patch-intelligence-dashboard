@@ -1,11 +1,9 @@
-/** Cloudflare Worker entry point for the vinext-starter template. */
-import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } from "vinext/server/image-optimization";
-import handler from "vinext/server/app-router-entry";
+import type { Database } from "../db/database";
+import type { ResponseCache } from "./cache";
 import { DASHBOARD_ANALYTICS_PANELS, queryDashboard, queryDashboardAnalytics, queryDashboardExport } from "../lib/api/dashboard-query";
 import type { DashboardAnalyticsPanel } from "../lib/api/contracts";
 import { queryCveDetail } from "../lib/api/cve-query";
-import { demoDashboard } from "../lib/demo-data";
-import { D1IngestionRepository, seedIngestionCatalog } from "../lib/ingestion/d1-repository";
+import { PostgresIngestionRepository, seedIngestionCatalog } from "../lib/ingestion/postgres-repository";
 import { ingestionBatchOutcome, runVendorAdapter } from "../lib/ingestion/pipeline";
 import { createVendorAdapter, SOURCE_IDS, type AdapterEnvironment } from "../lib/ingestion/source-registry";
 import { advanceCheckpoint, checkpointBatchKey, loadOrCreateCheckpoint, markCheckpointFailed, markCheckpointRunning, type IngestionCheckpoint, type IngestionRequest } from "../lib/ingestion/orchestration";
@@ -14,36 +12,21 @@ import { ingestCisaKev } from "../lib/ingestion/enrichments/cisa";
 import { ingestEpssBulk } from "../lib/ingestion/enrichments/epss";
 import { constantTimeEqual } from "../lib/ingestion/safety";
 import { addPublicCorsHeaders, publicCorsPreflight } from "../lib/api/cors";
-import { captureD1ProductionBaseline, pruneRollingRetention } from "../lib/operations/d1-health";
+import { capturePostgresProductionBaseline, pruneRollingRetention } from "../lib/operations/postgres-health";
 import { refreshDashboardProjection } from "../lib/operations/dashboard-projection";
 import { captureOperationalMonitor } from "../lib/operations/operational-monitor";
 
-interface Env extends AdapterEnvironment {
-  ASSETS: Fetcher;
-  DB: D1Database;
+export interface Env extends AdapterEnvironment {
+  DB: Database;
+  cache: ResponseCache;
   INGEST_SECRET?: string;
   PUBLIC_DASHBOARD_ORIGINS?: string;
-  CISCO_CLIENT_ID?: string;
-  CISCO_CLIENT_SECRET?: string;
-  IMAGES: {
-    input(stream: ReadableStream): {
-      transform(options: Record<string, unknown>): {
-        output(options: { format: string; quality: number }): Promise<{ response(): Response }>;
-      };
-    };
-  };
 }
 
 interface ExecutionContext {
   waitUntil(promise: Promise<unknown>): void;
   passThroughOnException(): void;
 }
-
-// Image security config. SVG sources with .svg extension auto-skip the
-// optimization endpoint on the client side (served directly, no proxy).
-// To route SVGs through the optimizer (with security headers), set
-// dangerouslyAllowSVG: true in next.config.js and uncomment below:
-// const imageConfig: ImageConfig = { dangerouslyAllowSVG: true };
 
 const worker = {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -76,23 +59,17 @@ const worker = {
     if (url.pathname === "/api/internal/projection" && request.method === "POST") return handleProjection(request, env);
     if (url.pathname === "/api/internal/monitor" && request.method === "GET") return handleMonitor(request, env);
 
-    if (url.pathname === "/_vinext/image") {
-      const allowedWidths = [...DEFAULT_DEVICE_SIZES, ...DEFAULT_IMAGE_SIZES];
-      return handleImageOptimization(request, {
-        fetchAsset: (path) => env.ASSETS.fetch(new Request(new URL(path, request.url))),
-        transformImage: async (body, { width, format, quality }) => {
-          const result = await env.IMAGES.input(body).transform(width > 0 ? { width } : {}).output({ format, quality });
-          return result.response();
-        },
-      }, allowedWidths);
-    }
+    return json({ error: "Not found" }, 404);
 
-    const response = await handler.fetch(request, env, ctx);
-    return withSecurityHeaders(response);
   },
 };
 
-export default worker;
+export async function handleApi(request: Request, env: Env, access: "public" | "private"): Promise<Response> {
+  const path = new URL(request.url).pathname;
+  if ((access === "public" && path.startsWith("/api/internal/")) || (access === "private" && !path.startsWith("/api/internal/"))) return json({ error: "Not found" },404);
+  try { return await worker.fetch(request, env, { waitUntil(promise) { void promise.catch(() => {}); }, passThroughOnException() {} }); }
+  catch { return json({ error: "Service temporarily unavailable" },503); }
+}
 
 const authFailures = new Map<string, { count: number; resetAt: number }>();
 
@@ -128,7 +105,7 @@ async function handleIngestion(request: Request, env: Env): Promise<Response> {
       if (checkpoint.status === "complete") return privateJson({ completedAt: new Date().toISOString(), status: "success", results: [{ sourceId, status: "unchanged", checkpoint }] });
       await markCheckpointRunning(env.DB, checkpoint.id);
       const key = body.idempotencyKey ?? checkpointBatchKey(checkpoint, body.checkpointId);
-      const result = await runVendorAdapter(adapter, new D1IngestionRepository(env.DB), {
+      const result = await runVendorAdapter(adapter, new PostgresIngestionRepository(env.DB), {
         since: checkpoint.windowStart, until: checkpoint.windowEnd, idempotencyKey: key,
         mode: checkpoint.mode, continuation: checkpoint.continuation ?? undefined,
         checkpointId: checkpoint.id, maxItems: clampBatchSize(body.maxItems),
@@ -155,7 +132,7 @@ async function handleIngestion(request: Request, env: Env): Promise<Response> {
   if (shouldRefreshProjection) {
     try {
       projection = await refreshDashboardProjection(env.DB);
-      await invalidateAnalyticsCaches(request);
+      await invalidateAnalyticsCaches(env);
     }
     catch (error) { projection = { status: "failed", error: safeError(error), lastKnownGoodPreserved: true }; }
   }
@@ -164,7 +141,8 @@ async function handleIngestion(request: Request, env: Env): Promise<Response> {
 }
 
 async function dashboardResponse(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-  const cache = (globalThis as unknown as { caches?: { default?: Cache } }).caches?.default;
+  const cache = env.cache;
+  const cacheEpoch = cache.epoch;
   const cacheKey = new Request(request.url, { method: "GET" });
   if (cache) {
     const cached = await cache.match(cacheKey);
@@ -172,10 +150,9 @@ async function dashboardResponse(request: Request, env: Env, ctx: ExecutionConte
   }
   try {
     const dashboard = await queryDashboard(env.DB, new URL(request.url));
-    const hasOperationalData = dashboard.sourceHealth.some((source) => source.lastAttempt);
-    const value = dashboard.metrics.total === 0 && !hasOperationalData ? demoDashboard : dashboard;
+    const value = dashboard;
     const response = json(value);
-    if (cache && value !== demoDashboard) ctx.waitUntil(cache.put(cacheKey, response.clone()));
+    if (cache) ctx.waitUntil(cache.put(cacheKey, response.clone(), cacheEpoch));
     return addCorsToResponse(response, request, env);
   } catch (error) {
     console.error(JSON.stringify({ event: "dashboard_query_error", detail: safeError(error) }));
@@ -187,7 +164,8 @@ async function dashboardAnalyticsResponse(request: Request, env: Env, ctx: Execu
   const url = new URL(request.url);
   const panel = decodeURIComponent(url.pathname.slice("/api/dashboard/analytics/".length)) as DashboardAnalyticsPanel;
   if (!DASHBOARD_ANALYTICS_PANELS.has(panel)) return json({ error: "Unknown dashboard analytics panel" }, 404, request, env);
-  const cache = (globalThis as unknown as { caches?: { default?: Cache } }).caches?.default;
+  const cache = env.cache;
+  const cacheEpoch = cache.epoch;
   const cacheKey = new Request(request.url, { method: "GET" });
   if (cache) {
     const cached = await cache.match(cacheKey);
@@ -196,7 +174,7 @@ async function dashboardAnalyticsResponse(request: Request, env: Env, ctx: Execu
   try {
     const analytics = await queryDashboardAnalytics(env.DB, url, panel);
     const response = json(analytics, 200, undefined, undefined, analyticsCacheControl(panel));
-    if (cache) ctx.waitUntil(cache.put(cacheKey, response.clone()));
+    if (cache) ctx.waitUntil(cache.put(cacheKey, response.clone(), cacheEpoch));
     return addCorsToResponse(response, request, env);
   } catch (error) {
     console.error(JSON.stringify({ event: "dashboard_analytics_error", panel, detail: safeError(error) }));
@@ -228,8 +206,8 @@ function csvCell(value: unknown): string { const text = value == null ? "" : Str
 async function handleInternalHealth(request: Request, env: Env): Promise<Response> {
   const authError = authorizeInternalRequest(request, env);
   if (authError) return authError;
-  try { return privateJson(await captureD1ProductionBaseline(env.DB)); }
-  catch (error) { return privateJson({ error: "D1 health baseline failed", detail: safeError(error) }, 503); }
+  try { return privateJson(await capturePostgresProductionBaseline(env.DB)); }
+  catch (error) { return privateJson({ error: "PostgreSQL health baseline failed", detail: safeError(error) }, 503); }
 }
 
 async function handleRetention(request: Request, env: Env): Promise<Response> {
@@ -244,17 +222,13 @@ async function handleProjection(request: Request, env: Env): Promise<Response> {
   if (authError) return authError;
   try {
     const result = await refreshDashboardProjection(env.DB);
-    await invalidateAnalyticsCaches(request);
+    await invalidateAnalyticsCaches(env);
     return privateJson(result);
   }
   catch (error) { return privateJson({ error: "Dashboard projection refresh failed", detail: safeError(error), lastKnownGoodPreserved: true }, 503); }
 }
 
-async function invalidateAnalyticsCaches(request: Request): Promise<void> {
-  const cache = (globalThis as unknown as { caches?: { default?: Cache } }).caches?.default;
-  if (!cache) return;
-  await Promise.all([...DASHBOARD_ANALYTICS_PANELS].map((panel) => cache.delete(new Request(new URL(`/api/dashboard/analytics/${panel}`, request.url), { method: "GET" }))));
-}
+async function invalidateAnalyticsCaches(env: Env): Promise<void> { env.cache.clear(); }
 
 async function handleMonitor(request: Request, env: Env): Promise<Response> {
   const authError = authorizeInternalRequest(request, env);
@@ -265,7 +239,7 @@ async function handleMonitor(request: Request, env: Env): Promise<Response> {
 
 function authorizeInternalRequest(request: Request, env: Env): Response | null {
   if (!env.INGEST_SECRET) return privateJson({ error: "Internal operations are not configured" }, 503);
-  const client = request.headers.get("cf-connecting-ip") ?? "unknown";
+  const client = "private";
   const bucket = authFailures.get(client);
   if (bucket && bucket.count >= 8 && bucket.resetAt > Date.now()) return privateJson({ error: "Too many authentication failures" }, 429);
   const supplied = request.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? "";
@@ -277,13 +251,12 @@ function authorizeInternalRequest(request: Request, env: Env): Response | null {
   return null;
 }
 
-async function acquireLease(db: D1Database, sourceId: string, holder: string): Promise<boolean> {
+export async function acquireLease(db: Database, sourceId: string, holder: string): Promise<boolean> {
   const now = new Date(); const expires = new Date(now.getTime() + 10 * 60_000);
-  await db.prepare("INSERT INTO ingestion_leases (source_id, holder, acquired_at, expires_at) VALUES (?, ?, ?, ?) ON CONFLICT(source_id) DO UPDATE SET holder=excluded.holder, acquired_at=excluded.acquired_at, expires_at=excluded.expires_at WHERE ingestion_leases.expires_at < ?").bind(sourceId, holder, now.toISOString(), expires.toISOString(), now.toISOString()).run();
-  const lease = await db.prepare("SELECT holder FROM ingestion_leases WHERE source_id=?").bind(sourceId).first<{ holder: string }>();
+  const lease = await db.prepare("INSERT INTO ingestion_leases (source_id, holder, acquired_at, expires_at) VALUES (?, ?, ?, ?) ON CONFLICT(source_id) DO UPDATE SET holder=excluded.holder, acquired_at=excluded.acquired_at, expires_at=excluded.expires_at WHERE ingestion_leases.expires_at < ? RETURNING holder").bind(sourceId, holder, now.toISOString(), expires.toISOString(), now.toISOString()).first<{ holder: string }>();
   return lease?.holder === holder;
 }
-async function releaseLease(db: D1Database, sourceId: string, holder: string): Promise<void> { await db.prepare("DELETE FROM ingestion_leases WHERE source_id=? AND holder=?").bind(sourceId, holder).run(); }
+export async function releaseLease(db: Database, sourceId: string, holder: string): Promise<void> { await db.prepare("DELETE FROM ingestion_leases WHERE source_id=? AND holder=?").bind(sourceId, holder).run(); }
 function json(value: unknown, status = 200, request?: Request, env?: Env, cacheControl?: string): Response {
   const headers = new Headers({ "content-type": "application/json; charset=utf-8", "cache-control": status === 200 ? cacheControl ?? "public, max-age=60, stale-while-revalidate=300" : "no-store" });
   if (request && env) addPublicCorsHeaders(headers, request, env.PUBLIC_DASHBOARD_ORIGINS);

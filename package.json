@@ -3,36 +3,41 @@
   "version": "0.1.0",
   "private": true,
   "engines": {
-    "node": ">=22.13.0"
+    "node": ">=24.0.0"
   },
   "scripts": {
-    "dev": "vinext dev",
-    "build": "vinext build",
-    "start": "vinext start",
+    "dev": "node --import tsx server/index.ts",
+    "build": "pnpm run pages:build",
+    "start": "node --import tsx server/index.ts",
     "pages:dev": "vite --config static-dashboard/vite.config.mjs --configLoader native",
     "pages:build": "vite build --config static-dashboard/vite.config.mjs --configLoader native",
     "pages:preview": "vite preview --config static-dashboard/vite.config.mjs --configLoader native",
-    "test": "vinext build && node --test --test-isolation=none tests/*.test.mjs",
-    "test:focused": "node --test --test-isolation=none tests/patch-intelligence-core.test.mjs tests/dashboard-read-model.test.mjs tests/operational-monitor.test.mjs tests/vulnerability-intelligence-analytics.test.mjs tests/vulnerability-intelligence-routes.test.mjs tests/production-readiness.test.mjs tests/vendor-adapter-parsers.test.mjs tests/edge-security-vendor-adapters.test.mjs tests/mozilla-adapter.test.mjs tests/vendor-enterprise-adapters.test.mjs tests/source-registry.test.mjs tests/cors.test.mjs",
+    "test": "pnpm run test:unit && pnpm run test:postgres",
+    "test:focused": "pnpm test",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern dist-pages --ignore-pattern .next --ignore-pattern work",
     "db:generate": "drizzle-kit generate",
-    "test:rendered": "node --test tests/rendered-html.test.mjs",
-    "test:pages": "node --test --test-isolation=none tests/pages-build.test.mjs"
+    "test:rendered": "node --import tsx --test tests/rendered-html.test.mjs",
+    "test:pages": "node --test --test-isolation=none tests/pages-build.test.mjs",
+    "typecheck": "tsc --noEmit",
+    "db:migrate": "node --import tsx scripts/migrate.ts",
+    "db:seed": "node --import tsx scripts/seed.ts",
+    "test:postgres": "node --import tsx --test --test-concurrency=1 tests/postgres/*.test.mjs",
+    "test:unit": "node --import tsx --test --test-isolation=none tests/*.test.mjs"
   },
   "dependencies": {
     "drizzle-orm": "0.45.2",
+    "pg": "^8.23.0",
     "react": "19.2.6",
     "react-dom": "19.2.6",
     "react-loading-skeleton": "3.5.0"
   },
   "devDependencies": {
-    "@cloudflare/vite-plugin": "1.37.1",
-    "@cloudflare/workers-types": "^5.20260819.1",
+    "@electric-sql/pglite": "^0.5.8",
     "@eslint/js": "9.39.4",
     "@next/eslint-plugin-next": "16.2.6",
-    "@openai/sites-vite-plugin": "0.1.0",
     "@tailwindcss/postcss": "4.2.1",
     "@types/node": "22.19.19",
+    "@types/pg": "^8.23.1",
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",
     "@vitejs/plugin-react": "6.0.2",
@@ -45,11 +50,11 @@
     "globals": "16.4.0",
     "react-server-dom-webpack": "19.2.6",
     "tailwindcss": "4.2.1",
+    "tsx": "^4.23.13",
     "typescript": "5.9.3",
     "typescript-eslint": "8.59.3",
     "vinext": "1.0.0-beta.2",
-    "vite": "8.0.13",
-    "wrangler": "4.92.0"
+    "vite": "8.0.13"
   },
   "type": "module"
 }

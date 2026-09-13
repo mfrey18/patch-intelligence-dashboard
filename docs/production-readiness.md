@@ -1,3 +1,5 @@
+> Historical Cloudflare/D1 runbook. For the active PostgreSQL deployment, use [native host operations](postgresql-native.md).
+
 # Production Readiness Gate #1
 
 This gate controls whether the current release candidate may be marked ready, merged, and published. It does not grant permission to merge or deploy. A PASS requires evidence; a FAIL requires correction before merge; a DEFER must be genuinely nonblocking and include a rationale.

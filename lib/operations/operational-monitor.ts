@@ -1,3 +1,4 @@
+import type { Database } from "../../db/database";
 import { queryDashboard } from "../api/dashboard-query";
 import { PRODUCTION_SOURCE_IDS } from "../ingestion/source-catalog";
 
@@ -27,7 +28,7 @@ export interface OperationalMonitorResult {
   alerts: OperationalAlert[];
 }
 
-export async function captureOperationalMonitor(db: D1Database, now = new Date(), measureCoreLatency: (db: D1Database) => Promise<number> = measureDashboardCoreLatency): Promise<OperationalMonitorResult> {
+export async function captureOperationalMonitor(db: Database, now = new Date(), measureCoreLatency: (db: Database) => Promise<number> = measureDashboardCoreLatency): Promise<OperationalMonitorResult> {
   const placeholders = PRODUCTION_SOURCE_IDS.map(() => "?").join(",");
   const [projection, actualCount, sources, ingestionLeases, projectionLease, latestSuccess] = await Promise.all([
     db.prepare("SELECT generated_at,cve_count,parity_status,parity_checked_at,last_attempt_status,last_attempt_at,last_attempt_error FROM dashboard_projection_state WHERE id='current'").first<Record<string, unknown>>(),
@@ -35,8 +36,8 @@ export async function captureOperationalMonitor(db: D1Database, now = new Date()
     db.prepare(`SELECT s.id source_id,r.started_at last_attempt,r.completed_at,r.status result,COALESCE(r.records_failed,0) failed,
       (SELECT completed_at FROM source_runs ok WHERE ok.source_id=s.id AND (ok.status IN ('success','unchanged') OR (ok.status='partial' AND ok.records_failed=0)) ORDER BY ok.completed_at DESC LIMIT 1) last_success,
       (SELECT started_at FROM source_runs bad WHERE bad.source_id=s.id AND (bad.status='failed' OR bad.records_failed>0) ORDER BY bad.started_at DESC LIMIT 1) last_failure,
-      (SELECT COUNT(*) FROM source_runs failures WHERE failures.source_id=s.id AND (failures.status='failed' OR failures.records_failed>0) AND failures.started_at>=datetime('now','-24 hours')) failures_24h,
-      (SELECT COUNT(*) FROM source_runs bh JOIN ingestion_checkpoints cp ON cp.id=bh.checkpoint_id WHERE bh.source_id=s.id AND bh.bound_hit=1 AND bh.ingestion_mode IN ('delta','patch_tuesday') AND cp.status IN ('pending','running','failed') AND bh.started_at>=datetime('now','-24 hours')) bound_hits_24h
+      (SELECT COUNT(*) FROM source_runs failures WHERE failures.source_id=s.id AND (failures.status='failed' OR failures.records_failed>0) AND failures.started_at>=(CURRENT_TIMESTAMP + INTERVAL '-24 hours')) failures_24h,
+      (SELECT COUNT(*) FROM source_runs bh JOIN ingestion_checkpoints cp ON cp.id=bh.checkpoint_id WHERE bh.source_id=s.id AND bh.bound_hit=TRUE AND bh.ingestion_mode IN ('delta','patch_tuesday') AND cp.status IN ('pending','running','failed') AND bh.started_at>=(CURRENT_TIMESTAMP + INTERVAL '-24 hours')) bound_hits_24h
       FROM sources s LEFT JOIN source_runs r ON r.id=(SELECT r2.id FROM source_runs r2 WHERE r2.source_id=s.id ORDER BY r2.started_at DESC LIMIT 1)
       WHERE s.id IN (${placeholders}) ORDER BY s.id`).bind(...PRODUCTION_SOURCE_IDS).all<Record<string, unknown>>(),
     db.prepare("SELECT source_id,acquired_at,expires_at FROM ingestion_leases").all<{ source_id: string; acquired_at: string; expires_at: string }>(),
@@ -80,7 +81,7 @@ export async function captureOperationalMonitor(db: D1Database, now = new Date()
 
 function nullableString(value: unknown): string | null { return value == null ? null : String(value); }
 
-async function measureDashboardCoreLatency(db: D1Database): Promise<number> {
+async function measureDashboardCoreLatency(db: Database): Promise<number> {
   const started = performance.now();
   await queryDashboard(db, new URL("https://monitor.invalid/api/dashboard?limit=1&include=core"));
   return Number((performance.now() - started).toFixed(2));

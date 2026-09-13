@@ -1,21 +1,25 @@
 import type { NormalizedAdvisory } from "../../domain/types";
 import type { AdvisoryRef, RawAdvisory, SourcePolicy, VendorAdapter } from "../contracts";
 import { defaultDiscoveryStart } from "../operational-policy";
-import { fetchWithPolicy, readJsonLimited } from "../safety";
+import { fetchWithPolicy, readJsonLimited, type FetchPolicyRuntime } from "../safety";
+import { createCiscoRequestPolicy } from "../cisco-rate-limit";
 import { list, record, stringValue } from "./utils";
 import { normalizeCsaf } from "./csaf";
 
 const OPENVULN_ROOT = "https://apix.cisco.com/security/advisories/v2";
 const TOKEN_URL = "https://id.cisco.com/oauth2/default/v1/token";
+// Adapter instances are recreated for every batch; keep quota and cooldown state here.
+const ciscoRequestPolicy = createCiscoRequestPolicy();
 interface CiscoCredentials { clientId?: string; clientSecret?: string; }
 
-export function createCiscoAdapter(credentials: CiscoCredentials = {}): VendorAdapter {
+export function createCiscoAdapter(credentials: CiscoCredentials = {}, runtime: FetchPolicyRuntime = ciscoRequestPolicy): VendorAdapter {
+  const unpacedRuntime = { fetch: runtime.fetch, now: runtime.now, sleep: runtime.sleep };
   let tokenCache: { value: string; expiresAt: number } | null = null;
   const accessToken = async (policy: SourcePolicy): Promise<string> => {
     if (tokenCache && tokenCache.expiresAt > Date.now() + 60_000) return tokenCache.value;
     if (!credentials.clientId || !credentials.clientSecret) throw new Error("Cisco ingestion requires CISCO_CLIENT_ID and CISCO_CLIENT_SECRET");
     const body = new URLSearchParams({ client_id: credentials.clientId, client_secret: credentials.clientSecret, grant_type: "client_credentials" });
-    const response = await fetchWithPolicy(TOKEN_URL, { ...policy, maxResponseBytes: 100_000 }, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body });
+    const response = await fetchWithPolicy(TOKEN_URL, { ...policy, maxResponseBytes: 100_000 }, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body }, [], unpacedRuntime);
     const payload = record(await readJsonLimited(response, 100_000));
     const value = stringValue(payload.access_token);
     const expiresIn = Number(payload.expires_in ?? 3600);
@@ -35,7 +39,7 @@ export function createCiscoAdapter(credentials: CiscoCredentials = {}): VendorAd
       for (const window of dateWindows(start, end, 31)) {
         for (let pageIndex = 1; pageIndex <= 100; pageIndex += 1) {
           const query = new URLSearchParams({ startDate: window.start, endDate: window.end, pageIndex: String(pageIndex), pageSize: "100" });
-          const response = await fetchWithPolicy(`${OPENVULN_ROOT}/all/lastpublished?${query}`, ctx.policy, { headers: { accept: "application/json", authorization: `Bearer ${token}` } }, [404]);
+          const response = await fetchWithPolicy(`${OPENVULN_ROOT}/all/lastpublished?${query}`, ctx.policy, { headers: { accept: "application/json", authorization: `Bearer ${token}` } }, [404], runtime);
           if (response.status === 404) break;
           const payload = record(await readJsonLimited(response, ctx.policy.maxResponseBytes));
           const rows = list(payload.advisories ?? payload);
@@ -55,7 +59,7 @@ export function createCiscoAdapter(credentials: CiscoCredentials = {}): VendorAd
       return [...refs.values()];
     },
     async fetch(ref, ctx) {
-      const response = await fetchWithPolicy(ref.url, ctx.policy);
+      const response = await fetchWithPolicy(ref.url, ctx.policy, undefined, [], unpacedRuntime);
       return { ref, contentType: response.headers.get("content-type") ?? "application/json", body: await readJsonLimited(response, ctx.policy.maxResponseBytes), fetchedAt: new Date().toISOString(), resolvedUrl: response.url, etag: response.headers.get("etag") ?? undefined, lastModified: response.headers.get("last-modified") ?? undefined };
     },
     async normalize(raw, ctx) { return [normalizeCiscoCsaf(raw, ctx.observedAt, ctx.sanitizeText)]; },

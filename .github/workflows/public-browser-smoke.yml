@@ -1,0 +1,55 @@
+name: Verify public dashboard without Tailscale
+
+on:
+  workflow_run:
+    workflows: ["Deploy static dashboard to GitHub Pages"]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: public-browser-smoke
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    if: vars.DATABASE_BACKEND == 'postgres' && github.repository == 'mfrey18/patch-intelligence-dashboard' && ((github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      # Deliberately no tailnet identity, Tailscale action, private secrets or deployment permissions.
+      - name: Record independent public vantage
+        run: |
+          mkdir -p work/public-browser-smoke
+          if pgrep -x tailscaled; then echo 'Unexpected Tailscale daemon on fresh runner'; exit 1; fi
+          ip -json address > work/public-browser-smoke/runner-addresses.json
+          ip -json route > work/public-browser-smoke/runner-routes.json
+          if ip -o link show | grep -Eq 'tailscale[0-9]'; then echo 'Unexpected tailnet interface'; exit 1; fi
+      - name: Install locked browser tooling
+        run: |
+          npm ci --ignore-scripts --prefix scripts/public-browser-smoke
+          scripts/public-browser-smoke/node_modules/.bin/playwright install --with-deps chromium
+      - name: Exercise deployed Pages through the public Internet
+        env:
+          PAGE_URL: https://mfrey18.github.io/patch-intelligence-dashboard/
+          PUBLIC_API_BASE_URL: ${{ vars.PUBLIC_API_BASE_URL }}
+          PUBLIC_VANTAGE: github-hosted-no-tailscale
+          PAGES_WORKFLOW_RUN_ID: ${{ github.event.workflow_run.id }}
+          PAGES_WORKFLOW_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: node scripts/public-browser-smoke/run.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: public-browser-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+          path: work/public-browser-smoke/
+          if-no-files-found: warn
+          retention-days: 30
