@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { KeyboardEvent } from "react";
 import type { DashboardAnalyticsPanel, DashboardAnalyticsResponse, DashboardResponse } from "../lib/api/contracts";
 import type { DashboardVulnerabilityRow } from "../lib/domain/types";
 
@@ -16,6 +17,7 @@ export function DashboardClient({ initialData, apiBaseUrl = "", cvePathPrefix = 
   const [shareStatus, setShareStatus] = useState("Copy view URL");
   const [panelStates, setPanelStates] = useState<Record<DashboardAnalyticsPanel, PanelLoadState>>(() => Object.fromEntries(ANALYTICS_PANELS.map((panel) => [panel, { status: "idle", error: null }])) as Record<DashboardAnalyticsPanel, PanelLoadState>);
   const requestSequence = useRef(0);
+  const shareResetTimer = useRef<number | null>(null);
 
   const loadPanel = useCallback(async (panel: DashboardAnalyticsPanel, params: URLSearchParams, sequence: number) => {
     setPanelStates((current) => ({ ...current, [panel]: { status: "loading", error: null } }));
@@ -67,8 +69,25 @@ export function DashboardClient({ initialData, apiBaseUrl = "", cvePathPrefix = 
     return () => { window.clearTimeout(initialRefresh); window.removeEventListener("popstate", pop); };
   }, [load]);
 
+  useEffect(() => () => {
+    if (shareResetTimer.current !== null) window.clearTimeout(shareResetTimer.current);
+  }, []);
+
+  const copyView = async () => {
+    if (shareResetTimer.current !== null) window.clearTimeout(shareResetTimer.current);
+    setShareStatus("Copying…");
+    try {
+      await navigator.clipboard.writeText(window.location.href);
+      setShareStatus("Copied");
+      shareResetTimer.current = window.setTimeout(() => setShareStatus("Copy view URL"), 1800);
+    } catch {
+      setShareStatus("Copy unavailable");
+    }
+  };
+
   const setFilter = (key: string, value: string) => {
     const params = new URLSearchParams(window.location.search);
+    if ((params.get(key) ?? "") === value) return;
     if (value) params.set(key, value); else params.delete(key);
     if (key !== "cursor") params.delete("cursor");
     const search = params.size ? `?${params}` : "";
@@ -101,9 +120,11 @@ export function DashboardClient({ initialData, apiBaseUrl = "", cvePathPrefix = 
   const activeLens = filters.priority === "P1" ? "urgent" : filters.exploited === "true" ? "exploited" : filters.patchAvailable === "true" ? "remediation" : "all";
   const orderedChanges = useMemo(() => [...data.recentChanges].sort((a, b) => changeWeight(b.changeType) - changeWeight(a.changeType) || Date.parse(b.observedAt) - Date.parse(a.observedAt)), [data.recentChanges]);
   const exportQuery = useMemo(() => { const params = new URLSearchParams(filters); params.delete("cursor"); params.set("limit", "1000"); return params.toString(); }, [filters]);
+  const activeFilterCount = Object.entries(filters).filter(([key, value]) => value && !["cursor", "include", "limit", "sort"].includes(key)).length;
+  const canClearFilters = Object.keys(filters).length > 0 || query.length > 0;
 
   return (
-    <main className="shell">
+    <main className="shell dashboardShell">
       <header className="topbar">
         <a className="brand" href="#top"><span className="brandMark">VI</span><span><strong>Vulnerability Intelligence</strong><small>Cross-vendor vulnerability and threat intelligence</small></span></a>
         <nav aria-label="Primary navigation"><a className="active" href="#overview">Overview</a><a href="#threats">Threats</a><a href="#vulnerabilities">Vulnerabilities</a><a href="#/patch-tuesday">Microsoft Patch Tuesday</a><a href="#/operations">Sources</a></nav>
@@ -120,15 +141,15 @@ export function DashboardClient({ initialData, apiBaseUrl = "", cvePathPrefix = 
             <button type="button" aria-pressed={activeLens === "remediation"} onClick={() => applyLens("remediation")}><span>Patch available</span><b>{data.metrics.patchAvailable}</b></button>
           </div>
         </div>
-        <div className="heroTools"><p>Search the intelligence record</p><form className="search" onSubmit={(event) => { event.preventDefault(); setFilter("q", query); }}><span aria-hidden="true">⌕</span><input aria-label="Search CVE, vendor, or product" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="CVE, vendor, or product" /><button type="submit">Search</button></form><small>{loading ? "Refreshing intelligence…" : `${sourceHealthy}/${data.sourceHealth.length || 4} sources fresh · updated ${timeAgo(data.generatedAt)}`}</small></div>
+        <div className="heroTools"><p>Search the intelligence record</p><form className="search" role="search" onSubmit={(event) => { event.preventDefault(); setFilter("q", query); }}><InterfaceIcon name="search" /><input aria-label="Search CVE, vendor, or product" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="CVE, vendor, or product" /><button type="submit" disabled={loading}>Search</button></form><small role="status" aria-live="polite" aria-atomic="true">{loading ? "Refreshing intelligence…" : `${sourceHealthy}/${data.sourceHealth.length || 4} sources fresh · updated ${timeAgo(data.generatedAt)}`}</small></div>
       </section>
 
       <section className="quickActions" aria-label="Dashboard quick actions">
-        <button type="button" aria-pressed={filters.view === "changed"} aria-busy={loading} disabled={loading} onClick={applyChangedView}>Changed Since Yesterday <b>{data.recentChanges.length}</b></button>
-        <a href="#/operations">Source Health</a>
+        <button type="button" aria-pressed={filters.view === "changed"} aria-busy={loading} disabled={loading} onClick={applyChangedView}><InterfaceIcon name="history" />Changed Since Yesterday <b>{data.recentChanges.length}</b></button>
+        <a href="#/operations"><InterfaceIcon name="activity" />Source Health</a>
       </section>
 
-      {error && <div className="notice" role="status">{error}</div>}
+      {error && <div className="notice" role="status"><span className="noticeCopy"><InterfaceIcon name="alert" />{error}</span><button className="actionWithIcon" type="button" onClick={() => void load()} disabled={loading}><InterfaceIcon name="refresh" />Retry refresh</button></div>}
       <section className="summary" id="overview" aria-busy={loading}>
         <div className="sectionTitle"><span><i /><h2>Current vulnerability intelligence</h2></span><small>Filtered six-month view · refreshed {formatDateTime(data.generatedAt)}</small></div>
         <div className="metrics">
@@ -151,10 +172,10 @@ export function DashboardClient({ initialData, apiBaseUrl = "", cvePathPrefix = 
 
       <section className="grid" id="threats">
         <article className="panel queuePanel">
-          <div className="panelHead"><div><p className="eyebrow">Intelligence prioritization</p><h2>Highest-priority vulnerabilities</h2></div><div className="pills"><button type="button" className="p1" title="P1 — Active Threat" onClick={() => setFilter("priority", "P1")}>P1 <b>{data.priorityDistribution.P1}</b></button><button type="button" className="p2" title="P2 — Elevated Intelligence" onClick={() => setFilter("priority", "P2")}>P2 <b>{data.priorityDistribution.P2}</b></button><button type="button" title="P3 — Monitored" onClick={() => setFilter("priority", "P3")}>P3 <b>{data.priorityDistribution.P3}</b></button></div></div>
+          <div className="panelHead"><div><p className="eyebrow">Intelligence prioritization</p><h2>Highest-priority vulnerabilities</h2></div><div className="pills"><button type="button" className="p1" title="P1 — Active Threat" aria-pressed={filters.priority === "P1"} onClick={() => setFilter("priority", "P1")}>P1 <b>{data.priorityDistribution.P1}</b></button><button type="button" className="p2" title="P2 — Elevated Intelligence" aria-pressed={filters.priority === "P2"} onClick={() => setFilter("priority", "P2")}>P2 <b>{data.priorityDistribution.P2}</b></button><button type="button" title="P3 — Monitored" aria-pressed={filters.priority === "P3"} onClick={() => setFilter("priority", "P3")}>P3 <b>{data.priorityDistribution.P3}</b></button></div></div>
           <div className="tierLegend"><span><b>P1</b> Active Threat</span><span><b>P2</b> Elevated Intelligence</span><span><b>P3</b> Monitored</span></div>
-          {topPriority.length ? topPriority.map((item) => <a className="queueRow" href={cveHref(item.cveId)} key={item.cveId}><span className={`badge ${item.priority.level.toLowerCase()}`}>{item.priority.level}</span><span className="queueCopy"><small>{item.vendor} · {item.cveId}</small><strong>{item.title}</strong><em>{item.priority.reasons.join(" · ")}</em></span><ThreatTags item={item} /><span className="arrow">→</span></a>) : <EmptyState message="No vulnerabilities match the active filters." />}
-          <a className="viewAll" href="#vulnerabilities">Review full vulnerability intelligence →</a>
+          {topPriority.length ? topPriority.map((item) => <a className="queueRow" href={cveHref(item.cveId)} key={item.cveId}><span className={`badge ${item.priority.level.toLowerCase()}`}>{item.priority.level}</span><span className="queueCopy"><small>{item.vendor} · {item.cveId}</small><strong>{item.title}</strong><em>{item.priority.reasons.join(" · ")}</em></span><ThreatTags item={item} /><span className="arrow"><InterfaceIcon name="arrow-right" /></span></a>) : <EmptyState message="No vulnerabilities match the active filters." />}
+          <a className="viewAll actionWithIcon" href="#vulnerabilities">Review full vulnerability intelligence<InterfaceIcon name="arrow-right" /></a>
         </article>
 
         <aside className="panel changesPanel" id="changes">
@@ -170,7 +191,7 @@ export function DashboardClient({ initialData, apiBaseUrl = "", cvePathPrefix = 
       </section>
 
       <section className="analyticsGrid" aria-label="Emerging vulnerability intelligence">
-        <article className="panel emergingPanel"><div className="panelHead"><div><p className="eyebrow">Transparent signal inclusion</p><h2>Emerging Vulnerabilities</h2></div><PanelStatus state={panelStates.emerging} /></div>{data.emergingVulnerabilities.length ? data.emergingVulnerabilities.slice(0, 6).map((item) => <a className="emergingRow" href={cveHref(item.vulnerability.cveId)} key={item.vulnerability.cveId}><span className={`badge ${item.vulnerability.priority.level.toLowerCase()}`}>{item.vulnerability.priority.level}</span><span><strong>{item.vulnerability.cveId}</strong><small>{item.vulnerability.vendor} · {item.reasons.join(" · ")}</small></span><span className="arrow">→</span></a>) : <EmptyState message="No vulnerabilities meet the emerging-intelligence criteria for this filtered set." />}</article>
+        <article className="panel emergingPanel"><div className="panelHead"><div><p className="eyebrow">Transparent signal inclusion</p><h2>Emerging Vulnerabilities</h2></div><PanelStatus state={panelStates.emerging} /></div>{data.emergingVulnerabilities.length ? data.emergingVulnerabilities.slice(0, 6).map((item) => <a className="emergingRow" href={cveHref(item.vulnerability.cveId)} key={item.vulnerability.cveId}><span className={`badge ${item.vulnerability.priority.level.toLowerCase()}`}>{item.vulnerability.priority.level}</span><span><strong>{item.vulnerability.cveId}</strong><small>{item.vulnerability.vendor} · {item.reasons.join(" · ")}</small></span><span className="arrow"><InterfaceIcon name="arrow-right" /></span></a>) : <EmptyState message="No vulnerabilities meet the emerging-intelligence criteria for this filtered set." />}</article>
         <article className="panel moversPanel"><div className="panelHead"><div><p className="eyebrow">Seven-day, same-model comparison</p><h2>Rising Exploitation Likelihood</h2></div><span><small>FIRST EPSS predictive enrichment</small><PanelStatus state={panelStates["epss-movers"]} /></span></div>{data.epssMovers.length ? data.epssMovers.slice(0, 6).map((item) => <a className="moverRow" href={cveHref(item.cveId)} key={item.cveId}><span><strong>{item.cveId}</strong><small>{item.vendor}{item.product ? ` · ${item.product}` : ""}</small></span><span title={`${item.previousScoreDate} to ${item.scoreDate} · model ${item.modelVersion ?? "not stated"}`}><b>{(item.previousScore * 100).toFixed(2)}% · {ordinalPercentile(item.previousPercentile)}</b><i>→</i><b>{(item.score * 100).toFixed(2)}% · {ordinalPercentile(item.percentile)}</b></span><em>+{Math.round(item.percentileDelta * 100)} pts</em></a>) : <EmptyState message="At least two same-model observations around seven days apart are required before movers are shown." />}</article>
       </section>
 
@@ -189,16 +210,31 @@ export function DashboardClient({ initialData, apiBaseUrl = "", cvePathPrefix = 
       {data.latestReleaseEvent && <section className="panel patchEvent" id="release-intelligence">
         <div className="panelHead"><div><p className="eyebrow">Vendor release intelligence · {data.latestReleaseEvent.eventDate}</p><h2>{data.latestReleaseEvent.label}</h2></div><span><small>{data.latestReleaseEvent.comparison ? `Compared with ${data.latestReleaseEvent.comparison.label}` : "First comparable release event"}</small><PanelStatus state={panelStates["patch-tuesday"]} /></span></div>
         <div className="eventStats"><EventStat value={data.latestReleaseEvent.total} label={data.latestReleaseEvent.totalBasis === "vendor_reported" ? "Microsoft-reported CVEs" : "Reported total unavailable"} delta={data.latestReleaseEvent.comparison?.totalDelta} /><EventStat value={data.latestReleaseEvent.linkedTotal} label="Linked CVEs" delta={data.latestReleaseEvent.comparison?.linkedTotalDelta} /><EventStat value={data.latestReleaseEvent.critical} label="Critical · linked" delta={data.latestReleaseEvent.comparison?.criticalDelta} /><EventStat value={data.latestReleaseEvent.high} label="High · linked" delta={data.latestReleaseEvent.comparison?.highDelta} /><EventStat value={data.latestReleaseEvent.knownExploited} label="Known exploited · linked" delta={data.latestReleaseEvent.comparison?.knownExploitedDelta} /><EventStat value={data.latestReleaseEvent.zeroDay} label="Zero-days · linked" delta={data.latestReleaseEvent.comparison?.zeroDayDelta} /><EventStat value={data.latestReleaseEvent.kev} label="CISA KEV · linked" delta={data.latestReleaseEvent.comparison?.kevDelta} /></div>
-        <p className="eventProvenance">Reconciliation: <strong>{titleCase(data.latestReleaseEvent.reconciliationStatus)}</strong>{data.latestReleaseEvent.linkCoveragePercent != null ? ` · ${data.latestReleaseEvent.linkCoveragePercent}% of Microsoft's reported total linked` : " · Microsoft reported total not yet captured"}. Linked CVEs drive severity, threat, and product metrics. {data.latestReleaseEvent.totalSourceUrl && <a href={data.latestReleaseEvent.totalSourceUrl} target="_blank" rel="noreferrer">Official Microsoft release note ↗</a>}</p>
+        <p className="eventProvenance">Reconciliation: <strong>{titleCase(data.latestReleaseEvent.reconciliationStatus)}</strong>{data.latestReleaseEvent.linkCoveragePercent != null ? ` · ${data.latestReleaseEvent.linkCoveragePercent}% of Microsoft's reported total linked` : " · Microsoft reported total not yet captured"}. Linked CVEs drive severity, threat, and product metrics. {data.latestReleaseEvent.totalSourceUrl && <a href={data.latestReleaseEvent.totalSourceUrl} target="_blank" rel="noreferrer" className="actionWithIcon">Official Microsoft release note<InterfaceIcon name="external" /><span className="srOnly"> (opens in a new tab)</span></a>}</p>
         <p className="panelNote">{data.latestReleaseEvent.productFamilyBasis === "vendor_reported" ? "Microsoft-reported affected CVEs by product family; a CVE may affect more than one family." : "Linked advisory CVEs by normalized product family."}</p>
         <BarList values={data.latestReleaseEvent.productFamilies} />
       </section>}
 
       <section className="panel tablePanel" id="vulnerabilities">
-        <div className="panelHead tableHeading"><div><p className="eyebrow">{data.metrics.total} matching records</p><h2>Vulnerability intelligence</h2></div><div className="tableActions">{data.rows.length >= 2 && <a href={`${comparePathPrefix}${data.rows.slice(0, 3).map((item) => item.cveId).join(",")}`}>Compare top {Math.min(3, data.rows.length)}</a>}<a title="Bounded export; use the returned cursor for additional rows" href={`${apiBaseUrl}/api/dashboard/export?format=csv&${exportQuery}`}>Export CSV · 1,000 max</a><a title="Bounded export includes a continuation cursor" href={`${apiBaseUrl}/api/dashboard/export?format=json&${exportQuery}`}>Export JSON · 1,000 max</a><button type="button" onClick={() => void copyCurrentView(setShareStatus)}>{shareStatus}</button><button type="button" onClick={() => clearFilters(load)}>Clear filters</button></div></div>
+        <div className="panelHead tableHeading">
+          <div><p className="eyebrow">{data.metrics.total} matching records</p><h2 id="vulnerability-table-title">Vulnerability intelligence</h2></div>
+          <div className="tableActions">
+            {data.rows.length >= 2 && <a className="actionWithIcon" href={`${comparePathPrefix}${data.rows.slice(0, 3).map((item) => item.cveId).join(",")}`}><InterfaceIcon name="compare" />Compare top {Math.min(3, data.rows.length)}</a>}
+            <a className="actionWithIcon" title="Bounded export; use the returned cursor for additional rows" href={`${apiBaseUrl}/api/dashboard/export?format=csv&${exportQuery}`}><InterfaceIcon name="download" />Export CSV · 1,000 max</a>
+            <a className="actionWithIcon" title="Bounded export includes a continuation cursor" href={`${apiBaseUrl}/api/dashboard/export?format=json&${exportQuery}`}><InterfaceIcon name="download" />Export JSON · 1,000 max</a>
+            <button className="actionWithIcon copyViewButton" type="button" disabled={shareStatus === "Copying…"} title={shareStatus === "Copy unavailable" ? "Copy the view URL from your browser's address bar." : undefined} onClick={() => void copyView()}>
+              <span className="iconSwap" aria-hidden="true"><span className="iconSwapLayer" data-active={shareStatus !== "Copied"}><InterfaceIcon name="copy" /></span><span className="iconSwapLayer" data-active={shareStatus === "Copied"}><InterfaceIcon name="check" /></span></span>
+              <span>{shareStatus}</span>
+            </button>
+            <button className="actionWithIcon" type="button" disabled={!canClearFilters} onClick={() => clearFilters(load)}><InterfaceIcon name="reset" />Clear filters{activeFilterCount > 0 && <span className="filterCount" aria-hidden="true">{activeFilterCount}</span>}</button>
+          </div>
+        </div>
+        <span className="srOnly" role="status" aria-live="polite" aria-atomic="true">{shareStatus === "Copied" ? "View URL copied to clipboard." : shareStatus === "Copy unavailable" ? "Clipboard access is unavailable. Copy the view URL from your browser's address bar." : ""}</span>
         <FilterBar filters={filters} setFilter={setFilter} />
-        <div className="tableWrap"><table><thead><tr><th>Intelligence Priority / CVE</th><th>Vendor / Product</th><th>Severity</th><th>CVSS</th><th>EPSS</th><th>Threat Signals</th><th>Published</th><th>Modified</th></tr></thead><tbody>{data.rows.map((item) => <tr key={item.cveId}><td><span className={`badge ${item.priority.level.toLowerCase()}`}>{item.priority.level}</span><a href={cveHref(item.cveId)}><strong>{item.cveId}</strong></a></td><td><strong>{item.vendor}</strong><small>{item.product ?? "Product not specified"}</small></td><td><span className={`severity ${item.severity}`}>{titleCase(item.severity)}</span></td><td><strong>{item.cvss?.toFixed(1) ?? "—"}</strong></td><td><strong>{item.epssPercentile == null ? "—" : ordinalPercentile(item.epssPercentile)}</strong><small>{item.epss == null ? "No current score" : `${(item.epss * 100).toFixed(1)}% probability`}</small></td><td><ThreatTags item={item} emptyLabel="None confirmed" /></td><td><strong>{item.publishedAt ? formatDate(item.publishedAt) : "—"}</strong><small>{item.publishedAt ? timeAgo(item.publishedAt) : "Not stated"}</small></td><td><strong>{item.modifiedAt ? formatDate(item.modifiedAt) : "—"}</strong><small>{item.modifiedAt ? timeAgo(item.modifiedAt) : "Not stated"}</small></td></tr>)}</tbody></table></div>
-        {data.nextCursor && <button className="loadMore" type="button" onClick={() => setFilter("cursor", data.nextCursor!)}>Load more vulnerabilities</button>}
+        <div className="filterSummary" role="status" aria-live="polite" aria-atomic="true">{loading ? "Updating matching records…" : error ? "Showing the last available snapshot." : `${data.metrics.total} matching ${data.metrics.total === 1 ? "record" : "records"}${activeFilterCount ? ` · ${activeFilterCount} ${activeFilterCount === 1 ? "filter" : "filters"} applied` : " · All intelligence"}`}</div>
+        <div className="tableWrap" aria-busy={loading}><table aria-labelledby="vulnerability-table-title"><thead><tr><th scope="col">Intelligence Priority / CVE</th><th scope="col">Vendor / Product</th><th scope="col">Severity</th><th scope="col">CVSS</th><th scope="col">EPSS</th><th scope="col">Threat Signals</th><th scope="col">Published</th><th scope="col">Modified</th></tr></thead><tbody>{data.rows.map((item) => <tr key={item.cveId}><td><span className={`badge ${item.priority.level.toLowerCase()}`}>{item.priority.level}</span><a href={cveHref(item.cveId)}><strong>{item.cveId}</strong></a></td><td><strong>{item.vendor}</strong><small>{item.product ?? "Product not specified"}</small></td><td><span className={`severity ${item.severity}`}>{titleCase(item.severity)}</span></td><td><strong>{item.cvss?.toFixed(1) ?? "—"}</strong></td><td><strong>{item.epssPercentile == null ? "—" : ordinalPercentile(item.epssPercentile)}</strong><small>{item.epss == null ? "No current score" : `${(item.epss * 100).toFixed(1)}% probability`}</small></td><td><ThreatTags item={item} emptyLabel="None confirmed" /></td><td><strong>{item.publishedAt ? formatDate(item.publishedAt) : "—"}</strong><small>{item.publishedAt ? timeAgo(item.publishedAt) : "Not stated"}</small></td><td><strong>{item.modifiedAt ? formatDate(item.modifiedAt) : "—"}</strong><small>{item.modifiedAt ? timeAgo(item.modifiedAt) : "Not stated"}</small></td></tr>)}</tbody></table></div>
+        {!data.rows.length && <div className="tableEmptyState"><InterfaceIcon name={error ? "alert" : "search"} /><strong className="emptyStateTitle">{loading ? "Refreshing intelligence…" : error ? "Intelligence is temporarily unavailable" : activeFilterCount ? "No matching vulnerabilities" : "No vulnerabilities available yet"}</strong><p>{error ? "Try refreshing again to load the latest intelligence." : activeFilterCount ? "Try a broader search or clear the filters to explore all available intelligence." : "Records will appear after the next successful source update."}</p>{activeFilterCount > 0 && !loading && <button className="actionWithIcon" type="button" onClick={() => clearFilters(load)}><InterfaceIcon name="reset" />Clear filters</button>}</div>}
+        {data.nextCursor && <button className="loadMore actionWithIcon" type="button" aria-busy={loading} disabled={loading} onClick={() => setFilter("cursor", data.nextCursor!)}><InterfaceIcon name="arrow-down" />{loading ? "Loading vulnerabilities…" : "Load more vulnerabilities"}</button>}
       </section>
 
       <section className="panel sourcePanel" id="sources"><div className="panelHead"><div><p className="eyebrow">Authoritative-source visibility</p><h2>Coverage &amp; Freshness</h2></div><small>Operational ingestion detail remains available per source.</small></div><div className="sourceGrid">{data.sourceHealth.map((source) => <article key={source.sourceId}><span className={`sourceState ${source.freshness !== "fresh" || source.result === "failed" ? "failed" : ""}`} /><div><strong>{source.name}</strong><small>{titleCase(source.freshness)} · {source.lastSuccess ? `last successful update ${timeAgo(source.lastSuccess)}` : "awaiting first successful update"}</small></div><details><summary>Operator details</summary><div className="sourceOps"><p>{source.result ?? "Not run"}{source.mode ? ` · ${source.mode}` : ""}{source.lastAttempt ? ` · attempted ${timeAgo(source.lastAttempt)}` : ""}{source.durationMs != null ? ` · ${source.durationMs} ms` : ""}</p><dl><div><dt>Discovered</dt><dd>{source.discovered}</dd></div><div><dt>Inserted</dt><dd>{source.inserted}</dd></div><div><dt>Changed</dt><dd>{source.changed}</dd></div><div><dt>Unchanged</dt><dd>{source.unchanged}</dd></div><div><dt>Failed</dt><dd>{source.failed}</dd></div></dl>{source.lastFailure && <p>Last failed attempt {timeAgo(source.lastFailure)}.</p>}{source.boundHit && <p>Configured Free-plan batch bound reached; continuation is preserved.</p>}{source.lease.active && <p>Ingestion lease active until {formatDateTime(source.lease.expiresAt!)}</p>}{source.checkpoint && <p>{titleCase(source.checkpoint.status)} checkpoint · {formatDate(source.checkpoint.windowStart)} through {formatDate(source.checkpoint.windowEnd)}</p>}{source.errorSummary && <p>{source.errorSummary}</p>}</div></details></article>)}</div></section>
@@ -241,6 +277,26 @@ function PanelStatus({ state }: { state: PanelLoadState }) {
   if (state.status === "loading") return <small className="panelLoadState" role="status">Updating panel…</small>;
   if (state.status === "error") return <small className="panelLoadState error" role="status" title={state.error ?? undefined}>Using last snapshot · refresh failed</small>;
   return null;
+}
+
+const interfaceIconPaths = {
+  search: "m21 21-4.4-4.4M19 11a8 8 0 1 1-16 0 8 8 0 0 1 16 0Z",
+  "arrow-right": "M5 12h14m-6-6 6 6-6 6",
+  "arrow-down": "M12 5v14m-6-6 6 6 6-6",
+  copy: "M9 9h11v11H9ZM5 15H4V4h11v1",
+  check: "m5 12 4 4L19 6",
+  download: "M12 3v12m-5-5 5 5 5-5M4 16v4h16v-4",
+  compare: "M4 5h6v14H4ZM14 5h6v14h-6Z",
+  reset: "M4 10a8 8 0 1 1 1 7M4 4v6h6",
+  refresh: "M20 8a8 8 0 0 0-13-3L4 8m0-5v5h5m-5 8a8 8 0 0 0 13 3l3-3m0 5v-5h-5",
+  alert: "M12 3 2 21h20ZM12 9v5m0 3v.1",
+  history: "M3 11a9 9 0 1 1 2.6 7.4M3 5v6h6m3-4v5l3 2",
+  activity: "M3 12h4l3-8 4 16 3-8h4",
+  external: "M14 3h7v7m0-7L10 14M10 3H3v18h18v-7",
+};
+
+function InterfaceIcon({ name }: { name: keyof typeof interfaceIconPaths }) {
+  return <svg className="uiIcon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false"><path d={interfaceIconPaths[name]} /></svg>;
 }
 
 function Metric({ label, value, detail, tone = "" }: { label: string; value: number; detail: string; tone?: string }) { return <article><span>{label}</span><strong className={tone}>{value}</strong><small>{detail}</small></article>; }
@@ -286,22 +342,22 @@ function FilterBar({ filters, setFilter }: { filters: Record<string, string>; se
   const vendors = ["microsoft", "cisco", "adobe", "fortinet", "palo-alto", "ivanti", "vmware-broadcom", "citrix", "chrome", "mozilla", "apple", "oracle", "atlassian", "sap"];
   return <div className="filters">
     <select aria-label="Vendor" value={filters.vendor ?? ""} onChange={(event) => setFilter("vendor", event.target.value)}><option value="">All vendors</option>{vendors.map((vendor) => <option key={vendor} value={vendor}>{titleCase(vendor)}</option>)}</select>
-    <input aria-label="Product" placeholder="Product" defaultValue={filters.product ?? ""} onBlur={(event) => setFilter("product", event.target.value)} />
+    <input aria-label="Product" placeholder="Product" key={"product" + (filters.product ?? "")} defaultValue={filters.product ?? ""} onKeyDown={applyFilterOnEnter} onBlur={(event) => setFilter("product", event.target.value)} />
     <select aria-label="Severity" value={filters.severity ?? ""} onChange={(event) => setFilter("severity", event.target.value)}><option value="">All severities</option>{["critical", "high", "medium", "low"].map((value) => <option key={value} value={value}>{titleCase(value)}</option>)}</select>
     <select aria-label="Intelligence priority" value={filters.priority ?? ""} onChange={(event) => setFilter("priority", event.target.value)}><option value="">All priorities</option><option value="P1">P1 — Active Threat</option><option value="P2">P2 — Elevated</option><option value="P3">P3 — Monitored</option></select>
     <select aria-label="Known exploited" value={filters.exploited ?? ""} onChange={(event) => setFilter("exploited", event.target.value)}><option value="">Any exploitation state</option><option value="true">Known exploited</option><option value="false">Not known exploited</option></select>
     <select aria-label="CISA KEV" value={filters.kev ?? ""} onChange={(event) => setFilter("kev", event.target.value)}><option value="">Any KEV state</option><option value="true">In CISA KEV</option><option value="false">Not in CISA KEV</option></select>
     <select aria-label="Zero-day" value={filters.zeroDay ?? ""} onChange={(event) => setFilter("zeroDay", event.target.value)}><option value="">Any zero-day state</option><option value="true">Confirmed zero-day</option><option value="false">Not confirmed</option></select>
     <select aria-label="EPSS percentile" value={filters.epssPercentileMin ?? ""} onChange={(event) => setFilter("epssPercentileMin", event.target.value)}><option value="">Any EPSS percentile</option><option value="0.7">70th percentile+</option><option value="0.9">90th percentile+</option><option value="0.95">95th percentile+</option></select>
-    <input aria-label="Published from" title="Published from" type="date" defaultValue={filters.publishedFrom ?? ""} onBlur={(event) => setFilter("publishedFrom", event.target.value)} />
+    <input aria-label="Published from" title="Published from" type="date" key={"publishedFrom" + (filters.publishedFrom ?? "")} defaultValue={filters.publishedFrom ?? ""} onKeyDown={applyFilterOnEnter} onBlur={(event) => setFilter("publishedFrom", event.target.value)} />
     <select aria-label="Sort vulnerabilities" value={filters.sort ?? ""} onChange={(event) => setFilter("sort", event.target.value)}><option value="">Intelligence priority</option><option value="epss">EPSS percentile</option><option value="cvss">CVSS</option><option value="modified">Last modified</option><option value="published">Publication date</option></select>
-    <details><summary>More filters</summary><div className="moreFilters">
-      <label>Minimum CVSS<input type="number" min="0" max="10" step="0.1" defaultValue={filters.cvssMin ?? ""} onBlur={(event) => setFilter("cvssMin", event.target.value)} /></label>
-      <label>Maximum CVSS<input type="number" min="0" max="10" step="0.1" defaultValue={filters.cvssMax ?? ""} onBlur={(event) => setFilter("cvssMax", event.target.value)} /></label>
-      <label>Minimum EPSS score<input type="number" min="0" max="1" step="0.01" defaultValue={filters.epssMin ?? ""} onBlur={(event) => setFilter("epssMin", event.target.value)} /></label>
-      <label>Published through<input type="date" defaultValue={filters.publishedTo ?? ""} onBlur={(event) => setFilter("publishedTo", event.target.value)} /></label>
-      <label>Modified from<input type="date" defaultValue={filters.modifiedFrom ?? ""} onBlur={(event) => setFilter("modifiedFrom", event.target.value)} /></label>
-      <label>Modified through<input type="date" defaultValue={filters.modifiedTo ?? ""} onBlur={(event) => setFilter("modifiedTo", event.target.value)} /></label>
+    <details className="filterDisclosure"><summary>More filters</summary><div className="moreFilters">
+      <label>Minimum CVSS<input type="number" min="0" max="10" step="0.1" key={"cvssMin" + (filters.cvssMin ?? "")} defaultValue={filters.cvssMin ?? ""} onKeyDown={applyFilterOnEnter} onBlur={(event) => setFilter("cvssMin", event.target.value)} /></label>
+      <label>Maximum CVSS<input type="number" min="0" max="10" step="0.1" key={"cvssMax" + (filters.cvssMax ?? "")} defaultValue={filters.cvssMax ?? ""} onKeyDown={applyFilterOnEnter} onBlur={(event) => setFilter("cvssMax", event.target.value)} /></label>
+      <label>Minimum EPSS score<input type="number" min="0" max="1" step="0.01" key={"epssMin" + (filters.epssMin ?? "")} defaultValue={filters.epssMin ?? ""} onKeyDown={applyFilterOnEnter} onBlur={(event) => setFilter("epssMin", event.target.value)} /></label>
+      <label>Published through<input type="date" key={"publishedTo" + (filters.publishedTo ?? "")} defaultValue={filters.publishedTo ?? ""} onKeyDown={applyFilterOnEnter} onBlur={(event) => setFilter("publishedTo", event.target.value)} /></label>
+      <label>Modified from<input type="date" key={"modifiedFrom" + (filters.modifiedFrom ?? "")} defaultValue={filters.modifiedFrom ?? ""} onKeyDown={applyFilterOnEnter} onBlur={(event) => setFilter("modifiedFrom", event.target.value)} /></label>
+      <label>Modified through<input type="date" key={"modifiedTo" + (filters.modifiedTo ?? "")} defaultValue={filters.modifiedTo ?? ""} onKeyDown={applyFilterOnEnter} onBlur={(event) => setFilter("modifiedTo", event.target.value)} /></label>
       <label>Patch availability<select value={filters.patchAvailable ?? ""} onChange={(event) => setFilter("patchAvailable", event.target.value)}><option value="">Any</option><option value="true">Available</option><option value="false">Not stated</option></select></label>
       <label>Mitigation<select value={filters.mitigationAvailable ?? ""} onChange={(event) => setFilter("mitigationAvailable", event.target.value)}><option value="">Any</option><option value="true">Available</option><option value="false">Not stated</option></select></label>
       <label>Workaround<select value={filters.workaroundAvailable ?? ""} onChange={(event) => setFilter("workaroundAvailable", event.target.value)}><option value="">Any</option><option value="true">Available</option><option value="false">Not stated</option></select></label>
@@ -310,7 +366,7 @@ function FilterBar({ filters, setFilter }: { filters: Record<string, string>; se
 }
 
 function clearFilters(load: (search?: string) => Promise<void>) { window.history.pushState({}, "", `${window.location.pathname}${window.location.hash}`); void load(""); }
-async function copyCurrentView(setStatus: (value: string) => void) { try { await navigator.clipboard.writeText(window.location.href); setStatus("Copied"); window.setTimeout(() => setStatus("Copy view URL"), 1800); } catch { setStatus("Copy unavailable"); } }
+function applyFilterOnEnter(event: KeyboardEvent<HTMLInputElement>) { if (event.key === "Enter") { event.preventDefault(); event.currentTarget.blur(); } }
 function vendorIdFromLabel(label: string) { const normalized = label.toLowerCase(); if (normalized.includes("palo alto")) return "palo-alto"; if (normalized.includes("vmware") || normalized.includes("broadcom")) return "vmware-broadcom"; if (normalized.includes("google chrome")) return "chrome"; return normalized.replace(/\s*\/\s*/g, "-").replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, ""); }
 function changeLabel(value: string) { const labels: Record<string, string> = { EXPLOITATION_STATUS_CHANGED: "Exploitation status changed", KEV_ADDED: "CISA KEV added", KEV_REMOVED: "CISA KEV removed", KEV_DEADLINE_CHANGED: "KEV deadline changed", ZERO_DAY_STATUS_CHANGED: "Zero-day status changed", SEVERITY_CHANGED: "Severity changed", CVSS_CHANGED: "CVSS changed", ADVISORY_REVISED: "Advisory revised", SOURCE_MODIFIED: "Source advisory modified", FIXED_VERSION_CHANGED: "Fixed version changed", WORKAROUND_ADDED: "Workaround added", MITIGATION_ADDED: "Mitigation added", REMEDIATION_CHANGED: "Remediation changed", NEW_CVE: "New vulnerability", NEW_ADVISORY: "New advisory" }; return labels[value] ?? titleCase(value); }
 function changeCategory(value: string) { if (["EXPLOITATION_STATUS_CHANGED", "KEV_ADDED", "KEV_REMOVED", "ZERO_DAY_STATUS_CHANGED"].includes(value)) return "threatChange"; if (["SEVERITY_CHANGED", "CVSS_CHANGED"].includes(value)) return "assessmentChange"; if (["REMEDIATION_CHANGED", "FIXED_VERSION_CHANGED", "MITIGATION_ADDED", "WORKAROUND_ADDED"].includes(value)) return "remediationChange"; return "advisoryChange"; }
