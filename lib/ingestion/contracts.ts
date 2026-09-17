@@ -24,6 +24,8 @@ export interface SourcePolicy {
   retryBaseMs: number;
 }
 
+export interface DiscoveryPage { refs: AdvisoryRef[]; nextCursor: string | null; }
+
 export interface DiscoveryContext { fetch: typeof fetch; since?: string; until?: string; signal?: AbortSignal; policy: SourcePolicy; }
 export interface FetchContext { fetch: typeof fetch; signal?: AbortSignal; policy: SourcePolicy; }
 export interface NormalizeContext { observedAt: string; sanitizeText(value: unknown): string | undefined; }
@@ -43,6 +45,8 @@ export interface VendorAdapter {
   vendor: VendorId;
   sourceId: string;
   discover(ctx: DiscoveryContext): Promise<AdvisoryRef[]>;
+  discoverPage?(ctx: DiscoveryContext, cursor?: string): Promise<DiscoveryPage>;
+  policy?: Partial<SourcePolicy>;
   fetch(ref: AdvisoryRef, ctx: FetchContext): Promise<RawAdvisory>;
   normalize(raw: RawAdvisory, ctx: NormalizeContext): Promise<NormalizedAdvisory[]>;
 }
@@ -76,6 +80,8 @@ export interface PriorRevision {
 }
 
 export interface IngestionRepository {
+  deferSource?(sourceId:string, retryAt:string): Promise<void>;
+  discoveryPage?(id: string, sourceId: string, discover: () => Promise<DiscoveryPage>): Promise<DiscoveryPage>;
   beginRun(sourceId: string, idempotencyKey: string | undefined, metadata: RunMetadata): Promise<{ runId: string; reused: boolean; continuation: string | null; boundHit: boolean }>;
   finishRun(runId: string, result: Omit<IngestResult, "sourceId" | "runId" | "startedAt" | "completedAt">): Promise<void>;
   latestRevision(vendor: VendorId, vendorAdvisoryId: string): Promise<PriorRevision | null>;

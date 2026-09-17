@@ -5,10 +5,10 @@ const get=async(path)=>{
   const response=await fetch(new URL(path,origin),{headers:{Authorization:`Bearer ${process.env.INGEST_SECRET}`},signal:AbortSignal.timeout(30000)});
   assert.ok(response.ok,`${path} returned ${response.status}`);return response.json();
 };
-const [monitor,health]=await Promise.all([get('/api/internal/monitor'),get('/api/internal/health')]);
+const [monitor,health,catalog]=await Promise.all([get('/api/internal/monitor'),get('/api/internal/health'),get('/api/internal/sources')]);
 assert.notEqual(monitor.status,'unhealthy',JSON.stringify(monitor.alerts));
 assert.equal(monitor.projection.parityStatus,'passed');assert.ok(monitor.projection.actualCount>0);
-assert.equal(monitor.sources.length,6);assert.ok(monitor.sources.every(source=>source.lastSuccess));
+assert.equal(monitor.sources.length,catalog.sources.filter(s=>s.enabled&&s.readiness==='production').length);assert.ok(monitor.sources.every(source=>source.lastSuccess));
 assert.ok(monitor.dashboardCoreLatencyMs<1000,'Core query exceeds one second');
 assert.equal(health.databaseEngine,'postgresql');assert.equal(health.backupStale,false,'Backup absent or stale');
 assert.ok(health.lastRestoreAt && Date.now()-Date.parse(health.lastRestoreAt)<35*86400000,'Successful restore test required');

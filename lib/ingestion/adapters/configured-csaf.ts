@@ -32,7 +32,7 @@ export function createConfiguredCsafAdapter(options: ConfiguredCsafOptions): Ven
       return urls.map((url): AdvisoryRef => ({ id: advisoryId(url), url }));
     },
     async fetch(ref, ctx) {
-      const response = await fetchWithPolicy(ref.url, ctx.policy, { headers: headers() });
+      const response = await fetchWithPolicy(ref.url, ctx.policy, { headers: headers(), redirect: "error" });
       return {
         ref,
         contentType: response.headers.get("content-type") ?? "application/json",
@@ -53,7 +53,7 @@ function validateUrls(values: string[], allowedHosts: string[]): string[] {
   return [...new Set(values.map((value) => {
     const url = new URL(value);
     const allowed = allowedHosts.some((host) => url.hostname === host || url.hostname.endsWith(`.${host}`));
-    if (url.protocol !== "https:" || !allowed || !/\.json$/i.test(url.pathname)) {
+    if (url.protocol !== "https:" || !!url.username || !!url.password || !allowed || !/\.json$/i.test(url.pathname)) {
       throw new Error(`Configured CSAF URL is not an approved HTTPS JSON source: ${value}`);
     }
     return url.toString();

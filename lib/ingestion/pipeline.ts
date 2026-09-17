@@ -4,7 +4,7 @@ import { hashAdvisory } from "./hash";
 import type { IngestionMode, IngestionRepository, IngestResult, SourcePolicy, VendorAdapter } from "./contracts";
 import { DEFAULT_SOURCE_POLICY } from "./contracts";
 import { clampBatchSize, decodeContinuationOffset, encodeContinuationOffset } from "./operational-policy";
-import { sanitizeText } from "./safety";
+import { sanitizeText, sourceCooldown } from "./safety";
 
 export interface RunVendorOptions {
   since?: string;
@@ -14,6 +14,7 @@ export interface RunVendorOptions {
   mode?: IngestionMode;
   continuation?: string;
   checkpointId?: string;
+  discoveryGeneration?: string;
   maxItems?: number;
 }
 
@@ -32,21 +33,29 @@ export async function runVendorAdapter(adapter: VendorAdapter, repository: Inges
   const runMetadata = { mode, windowStart: options.since, windowEnd: options.until, continuationIn: options.continuation, checkpointId: options.checkpointId, maxItems };
   const { runId, reused, continuation: storedContinuation, boundHit: storedBoundHit } = await repository.beginRun(adapter.sourceId, options.idempotencyKey, runMetadata);
   if (reused) return { sourceId: adapter.sourceId, runId, status: storedBoundHit ? "partial" : "unchanged", mode, window: { since: options.since, until: options.until }, processed: 0, continuation: storedContinuation, boundHit: storedBoundHit, counts: { discovered: 0, inserted: 0, changed: 0, unchanged: 0, failed: 0 }, errors: [], startedAt, completedAt: new Date().toISOString() };
-  const policy = { ...DEFAULT_SOURCE_POLICY, ...options.policy };
+  const policy = { ...DEFAULT_SOURCE_POLICY, ...adapter.policy, ...options.policy };
   const counts = { discovered: 0, inserted: 0, changed: 0, unchanged: 0, failed: 0 };
   const errors: string[] = [];
   let processed = 0;
   let continuation: string | null = null;
   let boundHit = false;
   try {
-    const discovered = (await adapter.discover({ fetch, since: options.since, until: options.until, policy })).toSorted((left, right) => `${left.sourceUpdatedAt ?? ""}|${left.id}|${left.url}`.localeCompare(`${right.sourceUpdatedAt ?? ""}|${right.id}|${right.url}`));
-    counts.discovered = discovered.length;
-    const offset = decodeContinuationOffset(options.continuation);
-    if (offset > discovered.length) throw new Error("Ingestion continuation exceeds the deterministic discovery set");
-    const refs = discovered.slice(offset, offset + maxItems);
+    const ctx = { fetch, since: options.since, until: options.until, policy };
+    const paged = options.continuation?.startsWith("page:") ? JSON.parse(Buffer.from(options.continuation.slice(5), "base64url").toString()) as { cursor?: string; offset: number } : null;
+    const cursor = paged?.cursor;
+    const offset = paged?.offset ?? decodeContinuationOffset(options.continuation);
+    if (!Number.isSafeInteger(offset) || offset < 0 || (cursor != null && typeof cursor !== "string")) throw new Error("Invalid discovery continuation");
+    const discover = async () => adapter.discoverPage ? adapter.discoverPage(ctx, cursor) : { refs: (await adapter.discover(ctx)).toSorted((left, right) => `${left.sourceUpdatedAt ?? ""}|${left.id}|${left.url}`.localeCompare(`${right.sourceUpdatedAt ?? ""}|${right.id}|${right.url}`)), nextCursor: null };
+    const pageIdentity = `${adapter.sourceId}:${options.discoveryGeneration ?? options.checkpointId ?? options.idempotencyKey ?? runId}:${options.since}:${options.until}:${cursor ?? "start"}`;
+    const page = repository.discoveryPage ? await repository.discoveryPage(pageIdentity, adapter.sourceId, discover) : await discover();
+    if (page.nextCursor != null && page.nextCursor === cursor) throw new Error("Discovery cursor did not advance");
+    counts.discovered = page.refs.length;
+    if (offset > page.refs.length) throw new Error("Ingestion continuation exceeds the deterministic discovery set");
+    const refs = page.refs.slice(offset, offset + maxItems);
     processed = refs.length;
-    if (offset + refs.length < discovered.length) {
-      continuation = encodeContinuationOffset(offset + refs.length);
+    if (offset + refs.length < page.refs.length || page.nextCursor != null) {
+      const next = offset + refs.length < page.refs.length ? { cursor, offset: offset + refs.length } : { cursor: page.nextCursor, offset: 0 };
+      continuation = adapter.discoverPage ? `page:${Buffer.from(JSON.stringify(next)).toString("base64url")}` : encodeContinuationOffset(offset + refs.length);
       boundHit = true;
     }
     for (const ref of refs) {
@@ -68,11 +77,14 @@ export async function runVendorAdapter(adapter: VendorAdapter, repository: Inges
         const message = safeError(error);
         errors.push(`${ref.id}: ${message}`);
         await repository.recordFailure(runId, ref, message, Date.now() - itemStart);
+        const retryAt=sourceCooldown(error);
+        if(retryAt) { await repository.deferSource?.(adapter.sourceId,retryAt); break; }
       }
     }
   } catch (error) {
     counts.failed += 1;
     errors.push(`discovery: ${safeError(error)}`);
+    const retryAt=sourceCooldown(error); if(retryAt)await repository.deferSource?.(adapter.sourceId,retryAt);
   }
   const status: IngestResult["status"] = counts.failed > 0 ? counts.inserted + counts.changed + counts.unchanged > 0 ? "partial" : "failed" : boundHit ? "partial" : counts.inserted + counts.changed === 0 ? "unchanged" : "success";
   const result = { status, mode, window: { since: options.since, until: options.until }, processed, continuation, boundHit, counts, errors };

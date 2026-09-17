@@ -4,7 +4,7 @@ export interface SourceCatalogEntry {
   id: string;
   vendorId: VendorId | null;
   name: string;
-  kind: "vendor_advisory" | "kev_snapshot" | "epss_snapshot";
+  kind: "vendor_advisory" | "kev_snapshot" | "epss_snapshot" | "cve_enrichment" | "exploitation_snapshot";
   discoveryUrl: string;
   requiresConfiguration?: boolean;
 }
@@ -22,6 +22,13 @@ export const SOURCE_CATALOG = [
   { id: "atlassian-vulnerability-api", vendorId: "atlassian", name: "Atlassian Vulnerability API", kind: "vendor_advisory", discoveryUrl: "https://api.atlassian.com/vuln-transparency/v1/cves" },
   { id: "apple-configured-csaf", vendorId: "apple", name: "Apple configured CSAF", kind: "vendor_advisory", discoveryUrl: "https://support.apple.com/100100", requiresConfiguration: true },
   { id: "sap-configured-csaf", vendorId: "sap", name: "SAP entitled configured CSAF", kind: "vendor_advisory", discoveryUrl: "https://support.sap.com/en/my-support/knowledge-base/security-notes-news.html", requiresConfiguration: true },
+  { id: "red-hat-csaf", vendorId: "red-hat", name: "Red Hat CSAF/VEX", kind: "vendor_advisory", discoveryUrl: "https://security.access.redhat.com/data/csaf/v2/advisories/changes.csv" },
+  { id: "vmware-broadcom-json", vendorId: "vmware-broadcom", name: "VMware / Broadcom", kind: "vendor_advisory", discoveryUrl: "https://www.broadcom.com/support/security/advisories/json" },
+  { id: "citrix-configured-csaf", vendorId: "citrix", name: "Citrix configured CSAF", kind: "vendor_advisory", discoveryUrl: "https://support.citrix.com/securitybulletins", requiresConfiguration: true },
+  { id: "chrome-configured-csaf", vendorId: "chrome", name: "Chrome configured CSAF", kind: "vendor_advisory", discoveryUrl: "https://chromereleases.googleblog.com", requiresConfiguration: true },
+  { id: "cve-list-v5", vendorId: null, name: "CVE Program records", kind: "cve_enrichment", discoveryUrl: "https://github.com/CVEProject/cvelistV5" },
+  { id: "nvd-cve", vendorId: null, name: "NVD CVE enrichment", kind: "cve_enrichment", discoveryUrl: "https://services.nvd.nist.gov/rest/json/cves/2.0" },
+  { id: "vulncheck-kev", vendorId: null, name: "VulnCheck KEV", kind: "exploitation_snapshot", discoveryUrl: "https://api.vulncheck.com/v3/backup/vulncheck-kev", requiresConfiguration: true },
   { id: "cisa-kev", vendorId: null, name: "CISA Known Exploited Vulnerabilities", kind: "kev_snapshot", discoveryUrl: "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json" },
   { id: "first-epss", vendorId: null, name: "FIRST EPSS bulk dataset", kind: "epss_snapshot", discoveryUrl: "https://epss.empiricalsecurity.com/epss_scores-current.csv.gz" },
 ] as const satisfies readonly SourceCatalogEntry[];
@@ -30,3 +37,11 @@ export const SOURCE_IDS = new Set<string>(SOURCE_CATALOG.map((source) => source.
 
 /** Sources intentionally included in the production daily cadence. */
 export const PRODUCTION_SOURCE_IDS = ["cisa-kev", "first-epss", "microsoft-msrc-csaf", "cisco-psirt-csaf", "palo-alto-psirt-csaf", "mozilla-mfsa-yaml"] as const;
+
+export type SourceReadiness = "pending_feed" | "pending_credentials" | "validating" | "production" | "paused";
+export function initialReadiness(id: string): {state: SourceReadiness; reason: string | null} {
+  if ((PRODUCTION_SOURCE_IDS as readonly string[]).includes(id)) return {state:"production",reason:null};
+  if (id === "vulncheck-kev") return {state:"pending_credentials",reason:"Requires a VulnCheck Community API token and source validation."};
+  if (["adobe-psirt-csaf","fortinet-psirt-csaf","ivanti-security-advisory-rss","apple-configured-csaf","sap-configured-csaf","citrix-configured-csaf","chrome-configured-csaf","vmware-broadcom-json"].includes(id)) return {state:"pending_feed",reason:"Awaiting a verified complete official structured feed and bounded replay; no production coverage claimed."};
+  return {state:"validating",reason:"Adapter available; production replay and scheduled-cycle validation required."};
+}

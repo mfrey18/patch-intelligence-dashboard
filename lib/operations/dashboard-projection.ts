@@ -1,9 +1,10 @@
+import { scopePredicate, severitySql } from "../api/intelligence-sql";
 import type { Database } from "../../db/database";
 import { PRIORITY_THRESHOLDS } from "../domain/priority";
 import { INTELLIGENCE_WINDOW_MONTHS } from "../ingestion/operational-policy";
 import { queryCanonicalProjectionParity, type ProjectionParityMetrics } from "../api/dashboard-query";
 
-export const DASHBOARD_PROJECTION_VERSION = 1;
+export const DASHBOARD_PROJECTION_VERSION = 2;
 
 export interface DashboardProjectionResult {
   status: "success";
@@ -136,23 +137,23 @@ WITH current_epss AS (
 ), scoped AS (
   SELECT c.id cve_id,
     COALESCE(c.description,MAX(CASE WHEN a.id IS NOT NULL THEN ac.vendor_description END),MAX(a.title),c.id) title,
-    COALESCE(STRING_AGG(DISTINCT v.name, ',' ORDER BY v.name),'CISA KEV') vendor,
-    '|' || COALESCE(REPLACE(STRING_AGG(DISTINCT a.vendor_id, ',' ORDER BY a.vendor_id),',','|'),'cisa') || '|' vendor_ids,
+    COALESCE(STRING_AGG(DISTINCT v.name, ',' ORDER BY v.name),CASE WHEN EXISTS(SELECT 1 FROM kev_entries vk WHERE vk.cve_id=c.id AND vk.active=TRUE) THEN 'CISA KEV' ELSE 'Unattributed · VulnCheck' END) vendor,
+    '|' || COALESCE(REPLACE(STRING_AGG(DISTINCT a.vendor_id, ',' ORDER BY a.vendor_id),',','|'),CASE WHEN EXISTS(SELECT 1 FROM kev_entries vk WHERE vk.cve_id=c.id AND vk.active=TRUE) THEN 'cisa' ELSE 'unattributed' END) || '|' vendor_ids,
     pn.product,
-    MAX(CASE WHEN a.id IS NULL THEN 0 ELSE CASE ac.normalized_severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END END) severity_rank,
-    MAX(CASE WHEN a.id IS NOT NULL THEN ac.vendor_cvss_score END) cvss,ce.score epss,ce.percentile epss_percentile,
+    ${severitySql} severity_rank,
+    COALESCE(MAX(CASE WHEN a.id IS NOT NULL THEN ac.vendor_cvss_score END),c.cvss_score) cvss,ce.score epss,ce.percentile epss_percentile,
     EXISTS(SELECT 1 FROM kev_entries k WHERE k.cve_id=c.id AND k.active=TRUE) kev,
     EXISTS(SELECT 1 FROM exploit_evidence ee WHERE ee.cve_id=c.id AND ee.evidence_type='known_exploitation' AND ee.status='confirmed') known_exploited,
     EXISTS(SELECT 1 FROM exploit_evidence ee WHERE ee.cve_id=c.id AND ee.evidence_type='zero_day' AND ee.status='confirmed') zero_day,
     BOOL_OR(rf.patch_available) patch_available,COALESCE(BOOL_OR(rf.mitigation_available),FALSE) mitigation_available,
     COALESCE(BOOL_OR(rf.workaround_available),FALSE) workaround_available,
-    MIN(a.published_at) published_at,MAX(a.source_updated_at) modified_at,c.cwe
+    COALESCE(MIN(a.published_at),c.published_at) published_at,COALESCE(MAX(a.source_updated_at),c.modified_at) modified_at,c.cwe
   FROM cves c LEFT JOIN advisory_cves ac ON ac.cve_id=c.id
   LEFT JOIN advisories a ON a.id=ac.advisory_id AND COALESCE(a.published_at,a.source_updated_at)>=(CURRENT_TIMESTAMP + INTERVAL '-${INTELLIGENCE_WINDOW_MONTHS} months')
   LEFT JOIN vendors v ON v.id=a.vendor_id LEFT JOIN current_epss ce ON ce.cve_id=c.id
   LEFT JOIN product_names pn ON pn.cve_id=c.id
   LEFT JOIN remediation_flags rf ON rf.cve_id=c.id
-  WHERE a.id IS NOT NULL OR EXISTS(SELECT 1 FROM kev_entries k WHERE k.cve_id=c.id AND k.active=TRUE AND date(k.date_added)>=(CURRENT_TIMESTAMP + INTERVAL '-${INTELLIGENCE_WINDOW_MONTHS} months'))
+  WHERE ${scopePredicate()}
   GROUP BY c.id,ce.score,ce.percentile,pn.product
 )
 SELECT cve_id,title,vendor,vendor_ids,product,severity_rank,cvss,epss,epss_percentile,

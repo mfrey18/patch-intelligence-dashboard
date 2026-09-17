@@ -1,6 +1,5 @@
 import type { Database } from "../../db/database";
 import { queryDashboard } from "../api/dashboard-query";
-import { PRODUCTION_SOURCE_IDS } from "../ingestion/source-catalog";
 
 export const OPERATIONAL_THRESHOLDS = Object.freeze({
   projectionStaleHours: 36,
@@ -29,7 +28,6 @@ export interface OperationalMonitorResult {
 }
 
 export async function captureOperationalMonitor(db: Database, now = new Date(), measureCoreLatency: (db: Database) => Promise<number> = measureDashboardCoreLatency): Promise<OperationalMonitorResult> {
-  const placeholders = PRODUCTION_SOURCE_IDS.map(() => "?").join(",");
   const [projection, actualCount, sources, ingestionLeases, projectionLease, latestSuccess] = await Promise.all([
     db.prepare("SELECT generated_at,cve_count,parity_status,parity_checked_at,last_attempt_status,last_attempt_at,last_attempt_error FROM dashboard_projection_state WHERE id='current'").first<Record<string, unknown>>(),
     db.prepare("SELECT COUNT(*) count FROM cve_dashboard_facts").first<{ count: number }>(),
@@ -39,7 +37,7 @@ export async function captureOperationalMonitor(db: Database, now = new Date(), 
       (SELECT COUNT(*) FROM source_runs failures WHERE failures.source_id=s.id AND (failures.status='failed' OR failures.records_failed>0) AND failures.started_at>=(CURRENT_TIMESTAMP + INTERVAL '-24 hours')) failures_24h,
       (SELECT COUNT(*) FROM source_runs bh JOIN ingestion_checkpoints cp ON cp.id=bh.checkpoint_id WHERE bh.source_id=s.id AND bh.bound_hit=TRUE AND bh.ingestion_mode IN ('delta','patch_tuesday') AND cp.status IN ('pending','running','failed') AND bh.started_at>=(CURRENT_TIMESTAMP + INTERVAL '-24 hours')) bound_hits_24h
       FROM sources s LEFT JOIN source_runs r ON r.id=(SELECT r2.id FROM source_runs r2 WHERE r2.source_id=s.id ORDER BY r2.started_at DESC LIMIT 1)
-      WHERE s.id IN (${placeholders}) ORDER BY s.id`).bind(...PRODUCTION_SOURCE_IDS).all<Record<string, unknown>>(),
+      WHERE s.enabled=TRUE AND s.readiness='production' ORDER BY s.id`).all<Record<string, unknown>>(),
     db.prepare("SELECT source_id,acquired_at,expires_at FROM ingestion_leases").all<{ source_id: string; acquired_at: string; expires_at: string }>(),
     db.prepare("SELECT acquired_at,expires_at FROM dashboard_projection_leases WHERE id='current'").first<{ acquired_at: string; expires_at: string }>(),
     db.prepare("SELECT MAX(completed_at) completed_at FROM source_runs WHERE status IN ('success','unchanged','partial') AND records_failed=0").first<{ completed_at: string | null }>(),

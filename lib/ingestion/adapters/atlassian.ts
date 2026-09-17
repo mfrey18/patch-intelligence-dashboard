@@ -1,5 +1,5 @@
 import type { NormalizedAdvisory, NormalizedAffectedProduct, NormalizedRemediation } from "../../domain/types";
-import type { AdvisoryRef, RawAdvisory, VendorAdapter } from "../contracts";
+import type { AdvisoryRef, RawAdvisory, VendorAdapter, SourcePolicy } from "../contracts";
 import { fetchWithPolicy, readJsonLimited } from "../safety";
 import { firstString, iso, list, normalizeSeverity, numberValue, record, stringValue, uniqueBy, validCve } from "./utils";
 
@@ -8,32 +8,24 @@ const ATLASSIAN_API = "https://api.atlassian.com/vuln-transparency/v1";
 export const atlassianAdapter: VendorAdapter = {
   vendor: "atlassian",
   sourceId: "atlassian-vulnerability-api",
-  async discover(ctx) {
-    const productResponse = await fetchWithPolicy(`${ATLASSIAN_API}/products`, ctx.policy, { headers: { accept: "application/json" } });
-    const productPayload = await readJsonLimited(productResponse, ctx.policy.maxResponseBytes);
+  async discover(ctx) { return (await atlassianAdapter.discoverPage!(ctx)).refs; },
+  async discoverPage(ctx, cursor) {
+    const policy = { ...ctx.policy, maxResponseBytes: 32_000_000 };
+    const productPayload = await cachedProducts(policy);
     const statuses = indexProductStatuses(productPayload);
+    const url = new URL(`${ATLASSIAN_API}/cves`);
+    if (cursor) url.searchParams.set("page_id", cursor);
+    const response = await atlassianFetch(url.toString(), policy);
+    const payload = record(await readJsonLimited(response, policy.maxResponseBytes));
+    if (!Array.isArray(payload.resources)) throw new Error("Atlassian CVE response is missing resources");
     const refs: AdvisoryRef[] = [];
-    let pageId: string | undefined;
-    for (let page = 0; page < 100; page += 1) {
-      const url = new URL(`${ATLASSIAN_API}/cves`);
-      if (pageId) url.searchParams.set("page_id", pageId);
-      const response = await fetchWithPolicy(url.toString(), ctx.policy, { headers: { accept: "application/json" } });
-      const payload = record(await readJsonLimited(response, ctx.policy.maxResponseBytes));
-      const rows = list(payload.resources);
-      for (const value of rows) {
-        const row = record(value);
-        const cveId = validCve(row.cve_id);
-        if (!cveId || !withinRange(row.cve_publish_date, ctx.since, ctx.until)) continue;
-        refs.push({
-          id: cveId,
-          url: `${ATLASSIAN_API}/cves?cve_ids=${encodeURIComponent(cveId)}`,
-          metadata: { cve: JSON.stringify(row), productStatuses: JSON.stringify(statuses.get(cveId) ?? []) },
-        });
-      }
-      pageId = stringValue(payload.next_page_id);
-      if (!pageId) return refs;
+    for (const value of payload.resources) {
+      const row = record(value); const cveId = validCve(row.cve_id);
+      if (!cveId) throw new Error("Atlassian returned an invalid CVE");
+      if (!withinRange(row.cve_publish_date, ctx.since, ctx.until)) continue;
+      refs.push({id: cveId, url: `${ATLASSIAN_API}/cves?cve_ids=${encodeURIComponent(cveId)}`, metadata: {cve: JSON.stringify(row), productStatuses: JSON.stringify(statuses.get(cveId) ?? [])}});
     }
-    throw new Error("Atlassian discovery exceeded the 100-page safety envelope");
+    return {refs, nextCursor: stringValue(payload.next_page_id) ?? null};
   },
   async fetch(ref, ctx) {
     const cached = ref.metadata?.cve;
@@ -136,4 +128,21 @@ function withinRange(value: unknown, since?: string, until?: string): boolean {
   if (!timestamp) return true;
   const time = new Date(timestamp).getTime();
   return (!since || time >= new Date(since).getTime()) && (!until || time <= new Date(until).getTime());
+}
+
+let nextRequestAt = 0;
+let productCache: { payload: unknown; expires: number } | undefined;
+async function atlassianFetch(url: string, policy: SourcePolicy) {
+  return fetchWithPolicy(url, policy, {headers:{accept:"application/json"}}, [], {schedule: async request => {
+    const wait = Math.max(0,nextRequestAt-Date.now()); nextRequestAt = Math.max(Date.now(),nextRequestAt)+6500;
+    if (wait) await new Promise(resolve=>setTimeout(resolve,wait));
+    return request();
+  }});
+}
+async function cachedProducts(policy: SourcePolicy) {
+  if (productCache && productCache.expires > Date.now()) return productCache.payload;
+  const payload = await readJsonLimited(await atlassianFetch(`${ATLASSIAN_API}/products`,policy),policy.maxResponseBytes);
+  if (!record(payload).products) throw new Error("Atlassian response is missing products");
+  productCache = {payload,expires:Date.now()+3600000};
+  return payload;
 }

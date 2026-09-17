@@ -121,3 +121,7 @@ See [the host operations runbook](docs/postgresql-native.md). The native workflo
 The production-readiness decision and runbook are in `docs/production-readiness.md`. The current capacity snapshot is recorded in `docs/d1-production-baseline.md`.
 
 Live cutover requires completing the native runbook; committing code alone does not switch the production database.
+
+## Vendor and enrichment expansion
+
+See [source expansion rollout](docs/source-expansion.md) for Oracle, Atlassian, Red Hat, gated vendor feeds, CVE/NVD enrichment, and VulnCheck KEV. New sources have explicit readiness states; only promoted production sources run automatically. Canonical assessments retain source provenance, and VulnCheck membership remains separate from CISA KEV.

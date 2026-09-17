@@ -2,7 +2,7 @@ import type { DashboardVulnerabilityRow, PriorityResult } from "../domain/types"
 
 export interface DashboardMetrics { total: number; critical: number; high: number; knownExploited: number; kev: number; zeroDay: number; patchAvailable: number; }
 export interface ChangeMetrics { since: string | null; newCves: number; newCritical: number; newlyKnownExploited: number; newKev: number; revisedAdvisories: number; newRemediation: number; }
-export interface SourceHealth { sourceId: string; name: string; lastAttempt: string | null; lastSuccess: string | null; lastFailure: string | null; durationMs: number | null; result: string | null; mode: string | null; freshness: "fresh" | "stale" | "never"; discovered: number; inserted: number; changed: number; unchanged: number; failed: number; boundHit: boolean; errorSummary: string | null; lease: { active: boolean; expiresAt: string | null }; checkpoint: { id: string; status: string; windowStart: string; windowEnd: string } | null; }
+export interface SourceHealth { coverage?: {from:string|null; through:string|null}; enrichmentQueue?: {total:number; pending:number}; readiness?: import("../ingestion/source-catalog").SourceReadiness; readinessReason?: string | null; enabled?: boolean; sourceId: string; name: string; lastAttempt: string | null; lastSuccess: string | null; lastFailure: string | null; durationMs: number | null; result: string | null; mode: string | null; freshness: "fresh" | "stale" | "never"; discovered: number; inserted: number; changed: number; unchanged: number; failed: number; boundHit: boolean; errorSummary: string | null; lease: { active: boolean; expiresAt: string | null }; checkpoint: { id: string; status: string; windowStart: string; windowEnd: string } | null; }
 export interface VulnerabilityActivityBucket { bucket: string; label: string; critical: number; high: number; medium: number; low: number; }
 export interface ThreatSignalBucket { bucket: string; label: string; knownExploited: number; kev: number; zeroDay: number; highEpss: number; }
 export interface EpssMover { cveId: string; vendor: string; product: string | null; previousScoreDate: string; scoreDate: string; previousScore: number; score: number; previousPercentile: number; percentile: number; scoreDelta: number; percentileDelta: number; modelVersion: string | null; }
@@ -70,7 +70,9 @@ export interface DashboardResponse {
 }
 
 export interface CveDetailResponse {
-  canonical: { cveId: string; description: string | null; cwe: string | null; cvss: number | null; cvssVector: string | null; publishedAt: string | null; modifiedAt: string | null; sourceUrl: string | null };
+  enrichment?: Array<{sourceId:string; sourceUrl:string; observedAt:string; sourceModifiedAt:string|null; record:import("../ingestion/enrichments/cve").EnrichmentRecord}>;
+  vulncheck?: {active:boolean; dateAdded:string; observedAt:string; sourceUrl:string; sourceId:"vulncheck-kev"} | null;
+  canonical: { status?:string; assessmentSource?:string|null; cveId: string; description: string | null; cwe: string | null; cvss: number | null; cvssVector: string | null; publishedAt: string | null; modifiedAt: string | null; sourceUrl: string | null };
   priority: PriorityResult;
   advisories: Array<{ id: string; sourceId: string; observedAt: string; vendor: string; vendorAdvisoryId: string; title: string; sourceUrl: string; vendorSeverity: string | null; normalizedSeverity: string; vendorCvss: number | null; vendorCvssVector: string | null; publishedAt: string | null; modifiedAt: string | null }>;
   affectedProducts: Array<{ advisoryId: string; sourceId: string; vendor: string; product: string; affectedVersion: string | null; fixedVersion: string | null; status: string; sourceProductId: string | null; sourceUrl: string; observedAt: string }>;
