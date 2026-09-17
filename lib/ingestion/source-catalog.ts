@@ -23,7 +23,7 @@ export const SOURCE_CATALOG = [
   { id: "apple-configured-csaf", vendorId: "apple", name: "Apple configured CSAF", kind: "vendor_advisory", discoveryUrl: "https://support.apple.com/100100", requiresConfiguration: true },
   { id: "sap-configured-csaf", vendorId: "sap", name: "SAP entitled configured CSAF", kind: "vendor_advisory", discoveryUrl: "https://support.sap.com/en/my-support/knowledge-base/security-notes-news.html", requiresConfiguration: true },
   { id: "red-hat-csaf", vendorId: "red-hat", name: "Red Hat CSAF/VEX", kind: "vendor_advisory", discoveryUrl: "https://security.access.redhat.com/data/csaf/v2/advisories/changes.csv" },
-  { id: "vmware-broadcom-json", vendorId: "vmware-broadcom", name: "VMware / Broadcom", kind: "vendor_advisory", discoveryUrl: "https://www.broadcom.com/support/security/advisories/json" },
+  { id: "vmware-broadcom-json", vendorId: "vmware-broadcom", name: "VMware / Broadcom", kind: "vendor_advisory", discoveryUrl: "https://support.broadcom.com/web/ecx/security-advisory/-/securityadvisory/getSecurityAdvisoryList" },
   { id: "citrix-configured-csaf", vendorId: "citrix", name: "Citrix configured CSAF", kind: "vendor_advisory", discoveryUrl: "https://support.citrix.com/securitybulletins", requiresConfiguration: true },
   { id: "chrome-configured-csaf", vendorId: "chrome", name: "Chrome configured CSAF", kind: "vendor_advisory", discoveryUrl: "https://chromereleases.googleblog.com", requiresConfiguration: true },
   { id: "cve-list-v5", vendorId: null, name: "CVE Program records", kind: "cve_enrichment", discoveryUrl: "https://github.com/CVEProject/cvelistV5" },

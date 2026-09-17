@@ -3,7 +3,7 @@ import {DEFAULT_SOURCE_POLICY} from '../lib/ingestion/contracts';
 import {sanitizeText} from '../lib/ingestion/safety';
 import {validateNormalizedAdvisory} from '../lib/ingestion/pipeline';
 import {rollingWindowStart} from '../lib/ingestion/operational-policy';
-import {writeFile,mkdir} from 'node:fs/promises';
+import {writeFile,mkdir,readFile} from 'node:fs/promises';
 const ids=process.argv.slice(2);const reports=[];
 for(const id of ids) {
  const report:{source:string;status:string;documents?:unknown[];error?:string}={source:id,status:'failed'};
@@ -23,4 +23,11 @@ for(const id of ids) {
  }catch(error){report.error=error instanceof Error?error.message:'Validation failed';}
  reports.push(report);console.log(JSON.stringify(report));
 }
-await mkdir('work/source-expansion',{recursive:true});await writeFile('work/source-expansion/live-validation.json',JSON.stringify({observedAt:new Date().toISOString(),reports},null,2));
+await mkdir('work/source-expansion',{recursive:true});
+const observedAt=new Date().toISOString();
+const path='work/source-expansion/live-validation.json';
+let previous:{source:string}[]=[];
+try { previous=JSON.parse(await readFile(path,'utf8')).reports??[]; } catch { /* First validation run. */ }
+const current=reports.map(report=>({...report,observedAt}));
+await writeFile(path,JSON.stringify({observedAt,reports:[...previous.filter(report=>!ids.includes(report.source)),...current]},null,2));
+if(reports.some(report=>report.status==='failed'))process.exitCode=1;

@@ -1,3 +1,4 @@
+import { broadcomAdapter } from './adapters/broadcom';
 import { redHatAdapter } from "./adapters/red-hat";
 import { createConfiguredCsafAdapter } from "./adapters/configured-csaf";
 import type { VendorAdapter } from "./contracts";
@@ -48,7 +49,7 @@ export function createVendorAdapter(sourceId: string, env: AdapterEnvironment): 
     case "red-hat-csaf": return redHatAdapter;
     case "citrix-configured-csaf": return createConfiguredCsafAdapter({vendor:"citrix",sourceId,urls:parseUrlList(env.CITRIX_CSAF_URLS),allowedHosts:["citrix.com","cloud.com","netscaler.com"],missingConfigurationMessage:"Citrix requires a verified official structured feed."});
     case "chrome-configured-csaf": return createConfiguredCsafAdapter({vendor:"chrome",sourceId,urls:parseUrlList(env.CHROME_CSAF_URLS),allowedHosts:["google.com","chromium.org"],missingConfigurationMessage:"Chrome requires a verified official structured feed."});
-    case "vmware-broadcom-json": return createConfiguredCsafAdapter({vendor:"vmware-broadcom",sourceId,urls:parseUrlList(env.BROADCOM_CSAF_URLS),allowedHosts:["broadcom.com","vmware.com"],missingConfigurationMessage:"Broadcom JSON access/details could not be validated; requires verified structured documents."});
+    case "vmware-broadcom-json": return env.BROADCOM_CSAF_URLS ? createConfiguredCsafAdapter({vendor:"vmware-broadcom",sourceId,urls:parseUrlList(env.BROADCOM_CSAF_URLS),allowedHosts:["broadcom.com","vmware.com"],missingConfigurationMessage:"Broadcom requires verified structured documents."}) : broadcomAdapter;
     case "microsoft-msrc-csaf": return microsoftAdapter;
     case "cisco-psirt-csaf": return createCiscoAdapter({ clientId: env.CISCO_CLIENT_ID, clientSecret: env.CISCO_CLIENT_SECRET });
     case "adobe-psirt-csaf": return createAdobeAdapter({ indexUrl: env.ADOBE_SECURITY_INDEX_URL, authorization: env.ADOBE_SECURITY_AUTHORIZATION });

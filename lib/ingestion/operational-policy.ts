@@ -11,6 +11,7 @@ export const REPLAY_WINDOW_DAYS = 1;
 export const PATCH_TUESDAY_WINDOW_DAYS = 1;
 export const SOURCE_WINDOW_DAYS: Readonly<Record<string, number>> = Object.freeze({
   "oracle-cpu-csaf": 186,
+  "vmware-broadcom-json": 186,
   "atlassian-vulnerability-api": 186,
   "palo-alto-psirt-csaf": 7,
   "mozilla-mfsa-yaml": 7,

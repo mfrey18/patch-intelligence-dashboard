@@ -9,7 +9,7 @@ The expansion runs on the native Node/PostgreSQL service. Existing production so
 | Oracle | CPU/CSPU CSAF; six-month reconciliation, 64 MB document limit | Live sample validated; full replay and two distinct-day delta cycles required |
 | Atlassian | Public CVE API with durable pages; cached product assertions and 6.5-second pacing | Live API currently returns empty responses/timeouts; remains validating |
 | Red Hat | Official changes index and security CSAF/VEX documents | Live sample validated; non-security RHBA/RHEA entries excluded; replay/cycles required |
-| VMware/Broadcom | Configured official CSAF document fallback | Both documented JSON interfaces returned HTTP 403 during validation; JSON parser/coverage remains blocked pending accessible representative responses |
+| VMware/Broadcom | Public paginated advisory JSON index; optional configured CSAF override | POST endpoint validated on September 17; advisory/CVE mappings available, complete product/fix details absent; remains gated |
 | Adobe | Configured official structured index | Verified feed/configuration required |
 | Fortinet | RSS discovery with configured official CSAF template | Verified accessible export required |
 | Ivanti | Configured official CSAF override; legacy RSS remains manual-only | RSS is incomplete; complete structured mapping required |
@@ -18,6 +18,8 @@ The expansion runs on the native Node/PostgreSQL service. Existing production so
 | CVE Program | Pinned CVE List V5 JSON and daily delta log | Validation, initial queue completion and two cycles required |
 | NVD | CVE API, daily modification pages and weekly reconciliation | Optional API key increases throughput; initial queue completion and two cycles required |
 | VulnCheck | Community KEV backup snapshot and cited exploitation references | Server-side Community token required; attribution is displayed |
+
+See [feed access and credential storage](feed-credentials.md) for signup links, exact runtime storage, and vendor-specific prerequisites.
 
 ## Operating the rollout
 
