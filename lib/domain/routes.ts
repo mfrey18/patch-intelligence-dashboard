@@ -1,7 +1,7 @@
 import { VENDOR_IDS, type VendorId } from "./types";
 
 const VENDOR_LABELS: Record<VendorId, string> = {
-  microsoft: "Microsoft", cisco: "Cisco", adobe: "Adobe", fortinet: "Fortinet", "palo-alto": "Palo Alto Networks", ivanti: "Ivanti", "vmware-broadcom": "VMware / Broadcom", citrix: "Citrix", chrome: "Google Chrome", mozilla: "Mozilla", apple: "Apple", oracle: "Oracle", atlassian: "Atlassian", sap: "SAP",
+  microsoft: "Microsoft", cisco: "Cisco", adobe: "Adobe", fortinet: "Fortinet", "palo-alto": "Palo Alto Networks", ivanti: "Ivanti", "vmware-broadcom": "VMware / Broadcom", citrix: "Citrix", chrome: "Google Chrome", mozilla: "Mozilla", apple: "Apple", oracle: "Oracle", atlassian: "Atlassian", sap: "SAP", "red-hat": "Red Hat",
 };
 
 export function isVendorId(value: string): value is VendorId { return (VENDOR_IDS as readonly string[]).includes(value); }

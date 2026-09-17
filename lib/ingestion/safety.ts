@@ -38,7 +38,7 @@ export async function fetchWithPolicy(url: string, policy: SourcePolicy, init?: 
         // Scheduling wait is separate from the network request timeout.
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), policy.timeoutMs);
-        try { return await (runtime.fetch ?? fetch)(url, { ...init, redirect: "follow", signal: controller.signal }); }
+        try { return await (runtime.fetch ?? fetch)(url, { ...init, redirect: init?.redirect ?? "follow", signal: controller.signal }); }
         finally { clearTimeout(timeout); }
       };
       response = await (runtime.schedule ? runtime.schedule(request) : request());
@@ -58,7 +58,7 @@ export async function fetchWithPolicy(url: string, policy: SourcePolicy, init?: 
       continue;
     }
     const length = Number(response.headers.get("content-length") ?? 0);
-    if (length > policy.maxResponseBytes) { await response.body?.cancel(); throw new Error(`Source response exceeds ${policy.maxResponseBytes} bytes`); }
+    if (init?.method?.toUpperCase() !== "HEAD" && length > policy.maxResponseBytes) { await response.body?.cancel(); throw new Error(`Source response exceeds ${policy.maxResponseBytes} bytes`); }
     return response;
   }
   throw new Error("Source fetch failed");
@@ -69,9 +69,24 @@ export async function readJsonLimited(response: Response, maxBytes: number): Pro
 }
 
 export async function readTextLimited(response: Response, maxBytes: number): Promise<string> {
-  const buffer = await response.arrayBuffer();
-  if (buffer.byteLength > maxBytes) throw new Error(`Source response exceeds ${maxBytes} bytes`);
-  return new TextDecoder().decode(buffer);
+  const reader = response.body?.getReader();
+  if (!reader) return "";
+  const chunks: Uint8Array[] = []; let size = 0;
+  let timedOut = false;
+  const deadline = setTimeout(() => { timedOut = true; void reader.cancel("Source body timeout"); }, 60_000);
+  try {
+    while (true) {
+      const {value,done} = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > maxBytes) { await reader.cancel(); throw new Error(`Source response exceeds ${maxBytes} bytes`); }
+      chunks.push(value);
+    }
+    if (timedOut) throw new Error("Source body timeout");
+    const buffer = new Uint8Array(size); let offset = 0;
+    for (const chunk of chunks) { buffer.set(chunk,offset); offset += chunk.byteLength; }
+    return new TextDecoder().decode(buffer);
+  } finally { clearTimeout(deadline); reader.releaseLock(); }
 }
 
 export function constantTimeEqual(left: string, right: string): boolean {
@@ -80,4 +95,10 @@ export function constantTimeEqual(left: string, right: string): boolean {
   let mismatch = a.length ^ b.length;
   for (let index = 0; index < Math.max(a.length, b.length); index += 1) mismatch |= (a[index % Math.max(a.length, 1)] ?? 0) ^ (b[index % Math.max(b.length, 1)] ?? 0);
   return mismatch === 0;
+}
+
+export function sourceCooldown(error: unknown): string | null {
+  if (!(error instanceof SourceHttpError)) return null;
+  const deadline=error.retryAt ?? (error.status===429?Date.now()+60_000:0);
+  return deadline>Date.now()?new Date(deadline).toISOString():null;
 }

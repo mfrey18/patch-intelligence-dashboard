@@ -8,6 +8,8 @@ import { ingestionBatchOutcome, runVendorAdapter } from "../lib/ingestion/pipeli
 import { createVendorAdapter, SOURCE_IDS, type AdapterEnvironment } from "../lib/ingestion/source-registry";
 import { advanceCheckpoint, checkpointBatchKey, loadOrCreateCheckpoint, markCheckpointFailed, markCheckpointRunning, type IngestionCheckpoint, type IngestionRequest } from "../lib/ingestion/orchestration";
 import { clampBatchSize } from "../lib/ingestion/operational-policy";
+import { ingestCveEnrichment } from "../lib/ingestion/enrichments/cve";
+import { ingestVulnCheck } from "../lib/ingestion/enrichments/vulncheck";
 import { ingestCisaKev } from "../lib/ingestion/enrichments/cisa";
 import { ingestEpssBulk } from "../lib/ingestion/enrichments/epss";
 import { constantTimeEqual } from "../lib/ingestion/safety";
@@ -53,6 +55,11 @@ const worker = {
       } catch { return json({ error: "CVE detail is temporarily unavailable" }, 503, request, env); }
     }
 
+    if (url.pathname === "/api/internal/sources" && request.method === "GET") {
+      const error=authorizeInternalRequest(request,env); if(error)return error;
+      const rows=await env.DB.prepare("SELECT id,kind,readiness,enabled FROM sources ORDER BY id").all();
+      return privateJson({sources:rows.results});
+    }
     if (url.pathname === "/api/internal/ingest" && request.method === "POST") return handleIngestion(request, env);
     if (url.pathname === "/api/internal/health" && request.method === "GET") return handleInternalHealth(request, env);
     if (url.pathname === "/api/internal/retention" && request.method === "POST") return handleRetention(request, env);
@@ -93,6 +100,9 @@ async function handleIngestion(request: Request, env: Env): Promise<Response> {
   if (body.since && body.until && new Date(body.since) > new Date(body.until)) return privateJson({ error: "since must not be later than until" }, 400);
   try { await seedIngestionCatalog(env.DB); } catch (error) { return privateJson({ error: "Ingestion schema is unavailable", detail: safeError(error) }, 503); }
 
+  const readiness=await env.DB.prepare("SELECT readiness,retry_after FROM sources WHERE id=?").bind(sourceId).first<{readiness:string;retry_after:string|null}>();
+  if(readiness?.retry_after && Date.parse(readiness.retry_after)>Date.now())return privateJson({status:"partial",results:[{sourceId,status:"skipped",reason:"Source cooldown",retryAfter:readiness.retry_after}]});
+  if(readiness?.readiness==="paused") return privateJson({status:"success",results:[{sourceId,status:"skipped",reason:"Source is paused"}]});
   const results: unknown[] = [];
   const holder = crypto.randomUUID();
   if (!(await acquireLease(env.DB, sourceId, holder))) return privateJson({ completedAt: new Date().toISOString(), status: "partial", results: [{ sourceId, status: "skipped", error: "Source ingestion is already running" }] }, 207);
@@ -108,7 +118,7 @@ async function handleIngestion(request: Request, env: Env): Promise<Response> {
       const result = await runVendorAdapter(adapter, new PostgresIngestionRepository(env.DB), {
         since: checkpoint.windowStart, until: checkpoint.windowEnd, idempotencyKey: key,
         mode: checkpoint.mode, continuation: checkpoint.continuation ?? undefined,
-        checkpointId: checkpoint.id, maxItems: clampBatchSize(body.maxItems),
+        checkpointId: checkpoint.id, discoveryGeneration: body.checkpointId, maxItems: clampBatchSize(body.maxItems),
       });
       const nextCheckpoint = await advanceCheckpoint(env.DB, checkpoint, result);
       results.push({ ...result, checkpoint: nextCheckpoint });
@@ -118,6 +128,9 @@ async function handleIngestion(request: Request, env: Env): Promise<Response> {
       const key = body.idempotencyKey ?? `${sourceId}:delta:${new Date().toISOString().slice(0, 10)}`;
       if (sourceId === "cisa-kev") results.push(await ingestCisaKev(env.DB, key));
       else if (sourceId === "first-epss") results.push(await ingestEpssBulk(env.DB, key));
+      else if (sourceId === "vulncheck-kev") results.push(await ingestVulnCheck(env.DB, env.VULNCHECK_API_TOKEN, key));
+      else if (sourceId === "cve-list-v5" || sourceId === "nvd-cve") results.push(await ingestCveEnrichment(env.DB, sourceId, env.NVD_API_KEY, body.idempotencyKey));
+      else throw new Error("Source has no usable adapter");
       shouldRefreshProjection = body.refreshProjection !== false;
     }
   } catch (error) {
@@ -193,8 +206,8 @@ async function dashboardExportResponse(request: Request, env: Env): Promise<Resp
   try {
     const exported = await queryDashboardExport(env.DB, url);
     if (format === "json") return json(exported, 200, request, env, "public, max-age=60, stale-while-revalidate=300");
-    const header = ["cve_id", "priority", "priority_reasons", "vendor", "product", "severity", "cvss", "epss", "epss_percentile", "kev", "known_exploited", "zero_day", "patch_available", "published_at", "modified_at"];
-    const lines = [header, ...exported.rows.map((row) => [row.cveId, row.priority.level, row.priority.reasons.join(" | "), row.vendor, row.product, row.severity, row.cvss, row.epss, row.epssPercentile, row.kev, row.knownExploited, row.zeroDay, row.patchAvailable, row.publishedAt, row.modifiedAt])].map((line) => line.map(csvCell).join(","));
+    const header = ["cve_id", "priority", "priority_reasons", "vendor", "product", "severity", "cvss", "epss", "epss_percentile", "kev", "known_exploited", "zero_day", "patch_available", "published_at", "modified_at", "vulncheck", "exploitation_sources", "assessment_source"];
+    const lines = [header, ...exported.rows.map((row) => [row.cveId, row.priority.level, row.priority.reasons.join(" | "), row.vendor, row.product, row.severity, row.cvss, row.epss, row.epssPercentile, row.kev, row.knownExploited, row.zeroDay, row.patchAvailable, row.publishedAt, row.modifiedAt, row.vulncheck, row.exploitationSources?.join(" | "), row.assessmentSource])].map((line) => line.map(csvCell).join(","));
     const headers = new Headers({ "content-type": "text/csv; charset=utf-8", "content-disposition": 'attachment; filename="patch-intelligence-export.csv"', "cache-control": "public, max-age=60, stale-while-revalidate=300", "x-next-cursor": exported.nextCursor ?? "" });
     addPublicCorsHeaders(headers, request, env.PUBLIC_DASHBOARD_ORIGINS);
     return withSecurityHeaders(new Response(lines.join("\r\n"), { headers }));

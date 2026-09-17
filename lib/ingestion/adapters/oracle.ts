@@ -14,6 +14,7 @@ const FIRST_CSPU_YEAR = 2026;
 export const oracleAdapter: VendorAdapter = {
   vendor: "oracle",
   sourceId: "oracle-cpu-csaf",
+  policy: { maxResponseBytes: 64_000_000, timeoutMs: 60_000 },
   async discover(ctx) {
     const since = defaultDiscoveryStart(ctx.since);
     const until = new Date(ctx.until ?? Date.now());

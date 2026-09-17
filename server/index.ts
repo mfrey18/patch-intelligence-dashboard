@@ -1,4 +1,6 @@
 import { createServer, type IncomingMessage } from 'node:http';
+import { refreshDashboardProjection } from '../lib/operations/dashboard-projection';
+import { seedIngestionCatalog } from '../lib/ingestion/postgres-repository';
 import { connectDatabase } from '../db/index';
 import { handleApi, type Env } from './api';
 import { ResponseCache } from './cache';
@@ -37,6 +39,8 @@ if (process.argv[1]?.endsWith('/server/index.ts')) {
   const reader=connectDatabase(process.env.READ_DATABASE_URL ?? '',true);
   const writer=connectDatabase(process.env.DATABASE_URL ?? '');
   await reader.prepare('SELECT 1').run();await writer.prepare('SELECT 1').run();
+  await seedIngestionCatalog(writer);
+  await refreshDashboardProjection(writer);
   const cache=new ResponseCache();
   const common={...process.env,cache};
   const servers=[createApiServer({...common,DB:reader},'public'),createApiServer({...common,DB:writer},'private')];

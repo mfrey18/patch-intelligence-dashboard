@@ -1,5 +1,5 @@
 export const VENDOR_IDS = [
-  "microsoft", "cisco", "adobe", "fortinet", "palo-alto", "ivanti", "vmware-broadcom", "citrix", "chrome", "mozilla", "apple", "oracle", "atlassian", "sap",
+  "microsoft", "cisco", "adobe", "fortinet", "palo-alto", "ivanti", "vmware-broadcom", "citrix", "chrome", "mozilla", "apple", "oracle", "atlassian", "sap", "red-hat",
 ] as const;
 
 export type VendorId = (typeof VENDOR_IDS)[number];
@@ -115,6 +115,9 @@ export interface PriorityResult {
 }
 
 export interface DashboardVulnerabilityRow {
+  vulncheck?: boolean;
+  exploitationSources?: string[];
+  assessmentSource?: string | null;
   cveId: string;
   title: string;
   vendor: string;

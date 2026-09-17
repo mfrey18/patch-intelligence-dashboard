@@ -26,7 +26,8 @@ export function normalizeIngestionRequest(sourceId: string, request: IngestionRe
   if (!INGESTION_MODES.includes(mode)) throw new Error("Unsupported ingestion mode");
   if (mode === "replay" && (!request.since || !request.until)) throw new Error("Replay mode requires explicit since and until timestamps");
 
-  const defaultStart = mode === "backfill" ? rollingWindowStart(now) : mode === "patch_tuesday" ? new Date(now.getTime() - 7 * 86_400_000) : defaultDeltaStart(now);
+  const reconcile = ["oracle-cpu-csaf", "atlassian-vulnerability-api"].includes(sourceId);
+  const defaultStart = mode === "backfill" || (mode === "delta" && reconcile) ? rollingWindowStart(now) : mode === "patch_tuesday" ? new Date(now.getTime() - 7 * 86_400_000) : defaultDeltaStart(now);
   const coverageStart = parseTimestamp(request.since, defaultStart, "since");
   const coverageEnd = parseTimestamp(request.until, now, "until");
   if (coverageStart > coverageEnd) throw new Error("since must not be later than until");

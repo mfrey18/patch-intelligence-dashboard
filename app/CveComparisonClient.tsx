@@ -30,8 +30,8 @@ export function CveComparisonClient({ cveIds, apiBaseUrl = "", backHref = "/", c
     <section className="panel comparisonPanel"><div className="tableWrap"><table><thead><tr><th>Intelligence field</th>{results.map((result) => <th key={result.cveId}><a href={`${cvePathPrefix}${encodeURIComponent(result.cveId)}`}>{result.cveId}</a></th>)}</tr></thead><tbody>
       <ComparisonRow label="Status" results={results} value={(detail, result) => result.error ?? (detail ? "Available" : "Unavailable")} />
       <ComparisonRow label="Priority" results={results} value={(detail) => detail ? `${detail.priority.level} — ${priorityLabel(detail.priority.level)} · ${detail.priority.reasons.join(" · ")}` : "—"} />
-      <ComparisonRow label="Severity" results={results} value={(detail) => detail ? highestSeverity(detail) : "—"} />
-      <ComparisonRow label="CVSS" results={results} value={(detail) => detail ? score(detail.canonical.cvss ?? highestVendorCvss(detail)) : "—"} />
+      <ComparisonRow label="Severity" results={results} value={(detail) => detail ? detail.priority.components.severity : "—"} />
+      <ComparisonRow label="CVSS" results={results} value={(detail) => detail ? score(detail.priority.components.cvss) : "—"} />
       <ComparisonRow label="EPSS" results={results} value={(detail) => detail?.epss.current ? `${(detail.epss.current.score * 100).toFixed(2)}% · ${Math.round(detail.epss.current.percentile * 100)}th percentile` : "Not observed"} />
       <ComparisonRow label="Known exploitation" results={results} value={(detail) => detail?.exploitation.knownExploited ? "Confirmed by authoritative evidence" : "Not confirmed"} threat />
       <ComparisonRow label="CISA KEV" results={results} value={(detail) => detail?.kev?.active ? `Active · added ${date(detail.kev.dateAdded)}${detail.kev.dueDate ? ` · due ${date(detail.kev.dueDate)}` : ""}` : "Not listed"} threat />
@@ -51,5 +51,3 @@ function unique(values: string[]) { return [...new Set(values)]; }
 function score(value: number | null) { return value == null ? "Not stated" : value.toFixed(1); }
 function date(value: string | null) { return value ? new Intl.DateTimeFormat("en", { dateStyle: "medium", timeZone: "UTC" }).format(new Date(value)) : "Not stated"; }
 function priorityLabel(value: CveDetailResponse["priority"]["level"]) { return value === "P1" ? "Active Threat" : value === "P2" ? "Elevated Intelligence" : "Monitored"; }
-function highestSeverity(detail: CveDetailResponse) { const order = ["critical", "high", "medium", "low", "unknown"]; const severity = [...detail.advisories].sort((a, b) => order.indexOf(a.normalizedSeverity) - order.indexOf(b.normalizedSeverity))[0]?.normalizedSeverity; return severity ? severity[0].toUpperCase() + severity.slice(1) : "Not stated"; }
-function highestVendorCvss(detail: CveDetailResponse) { const scores = detail.advisories.map((item) => item.vendorCvss).filter((item): item is number => item != null); return scores.length ? Math.max(...scores) : null; }

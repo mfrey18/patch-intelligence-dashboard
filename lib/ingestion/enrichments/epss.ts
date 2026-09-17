@@ -1,3 +1,4 @@
+import { scopePredicate } from "../../api/intelligence-sql";
 import type { Database, Statement } from "../../../db/database";
 import type { IngestResult } from "../contracts";
 import { PostgresIngestionRepository } from "../postgres-repository";
@@ -69,10 +70,7 @@ export async function ingestEpssBulk(db: Database, idempotencyKey?: string, opti
       LEFT JOIN advisory_cves ac ON ac.cve_id=c.id
       LEFT JOIN advisories a ON a.id=ac.advisory_id
         AND COALESCE(a.published_at,a.source_updated_at)>=(CURRENT_TIMESTAMP + INTERVAL '-${INTELLIGENCE_WINDOW_MONTHS} months')
-      WHERE a.id IS NOT NULL OR EXISTS(
-        SELECT 1 FROM kev_entries k WHERE k.cve_id=c.id AND k.active=TRUE
-          AND date(k.date_added)>=(CURRENT_TIMESTAMP + INTERVAL '-${INTELLIGENCE_WINDOW_MONTHS} months')
-      )`).all<{ id: string }>();
+      WHERE ${scopePredicate()}`).all<{ id: string }>();
     const tracked = new Set((trackedRows.results ?? []).map((row) => row.id));
     let matched = 0;
     const trackedObservations: EpssRow[] = [];

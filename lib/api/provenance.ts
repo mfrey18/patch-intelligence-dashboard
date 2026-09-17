@@ -7,6 +7,8 @@ export function assertCveProvenance(detail: CveDetailResponse): void {
     if (Number.isNaN(new Date(observedAt).getTime())) throw new Error(`${label} is missing a valid observed timestamp`);
   };
 
+  for (const value of detail.enrichment ?? []) requireEvidence(value.sourceId,value.sourceUrl,value.observedAt,"CVE enrichment");
+  if(detail.vulncheck) requireEvidence(detail.vulncheck.sourceId,detail.vulncheck.sourceUrl,detail.vulncheck.observedAt,"VulnCheck membership");
   for (const advisory of detail.advisories) requireEvidence(advisory.sourceId, advisory.sourceUrl, advisory.observedAt, `Advisory ${advisory.id}`);
   for (const product of detail.affectedProducts) requireEvidence(product.sourceId, product.sourceUrl, product.observedAt, `Affected product ${product.product}`);
   for (const remediation of detail.remediations) requireEvidence(remediation.sourceId, remediation.sourceUrl, remediation.observedAt, `Remediation ${remediation.advisoryId}`);

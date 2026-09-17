@@ -1,3 +1,4 @@
+import { scopePredicate, severitySql, intelligenceColumns } from "./intelligence-sql";
 import type { Database } from "../../db/database";
 import type { DashboardAnalyticsPanel, DashboardAnalyticsResponse, DashboardResponse, PatchTuesdayReleaseEvent, SourceHealth } from "./contracts";
 import type { DashboardVulnerabilityRow, NormalizedSeverity } from "../domain/types";
@@ -6,7 +7,7 @@ import { EMERGING_CHANGE_WINDOW_DAYS, EPSS_MOVER_DATE_TOLERANCE_DAYS, EPSS_MOVER
 import { INTELLIGENCE_WINDOW_MONTHS } from "../ingestion/operational-policy";
 
 interface BaseRow {
-  cve_id: string; title: string; vendor: string; product: string | null; severity_rank: number; cvss: number | null; epss: number | null; epss_percentile: number | null; kev: boolean; known_exploited: boolean; zero_day: boolean; patch_available: boolean | null; mitigation_available: boolean; workaround_available: boolean; published_at: string | null; modified_at: string | null;
+  vulncheck?: boolean; exploitation_sources?: string | string[]; assessment_source?: string | null; cve_id: string; title: string; vendor: string; product: string | null; severity_rank: number; cvss: number | null; epss: number | null; epss_percentile: number | null; kev: boolean; known_exploited: boolean; zero_day: boolean; patch_available: boolean | null; mitigation_available: boolean; workaround_available: boolean; published_at: string | null; modified_at: string | null;
 }
 
 export async function queryDashboard(db: Database, url: URL): Promise<DashboardResponse> {
@@ -23,7 +24,7 @@ export async function queryDashboard(db: Database, url: URL): Promise<DashboardR
     recentChanges, sourceHealth, latestReleaseEvent, activity, epssMovers,
     emergingVulnerabilities, vendorThreatSeries, changeCategoryCounts, cweAnalytics,
   ] = await Promise.all([
-    db.prepare(`${cte} SELECT * FROM filtered ORDER BY ${sort} LIMIT ? OFFSET ?`).bind(...bindings, limit + 1, offset).all<BaseRow>(),
+    db.prepare(`${cte} SELECT *,${intelligenceColumns("filtered.cve_id")} FROM filtered ORDER BY ${sort} LIMIT ? OFFSET ?`).bind(...bindings, limit + 1, offset).all<BaseRow>(),
     db.prepare(`${cte} SELECT COUNT(*) total, COALESCE(SUM((severity_rank=4)::integer),0) critical, COALESCE(SUM((severity_rank=3)::integer),0) high, COALESCE(SUM((known_exploited)::integer),0) known_exploited, COALESCE(SUM((kev)::integer),0) kev, COALESCE(SUM((zero_day)::integer),0) zero_day, COALESCE(SUM((patch_available=TRUE)::integer),0) patch_available, COALESCE(SUM((kev=TRUE OR known_exploited=TRUE)::integer),0) p1, COALESCE(SUM((kev=FALSE AND known_exploited=FALSE AND ((severity_rank=4 AND epss_percentile>=?) OR (severity_rank=3 AND epss_percentile>=?)))::integer),0) p2 FROM filtered`).bind(...bindings, PRIORITY_THRESHOLDS.criticalHighEpssPercentile, PRIORITY_THRESHOLDS.highVeryHighEpssPercentile).first<Record<string, number>>(),
     db.prepare(`${cte} SELECT severity_rank, COUNT(*) value FROM filtered GROUP BY severity_rank ORDER BY severity_rank DESC`).bind(...bindings).all<{ severity_rank: number; value: number }>(),
     db.prepare(`${cte} SELECT vendor, COUNT(*) value FROM filtered GROUP BY vendor ORDER BY value DESC LIMIT 12`).bind(...bindings).all<{ vendor: string; value: number }>(),
@@ -104,7 +105,7 @@ export async function queryDashboardExport(db: Database, url: URL): Promise<{ ge
   const { cte, bindings } = projection ? buildProjectedFilteredCte(url.searchParams) : buildCanonicalFilteredCte(url.searchParams);
   const limit = clamp(Number(url.searchParams.get("limit") ?? 1_000), 1, 1_000);
   const offset = decodeCursor(url.searchParams.get("cursor"));
-  const result = await db.prepare(`${cte} SELECT * FROM filtered ORDER BY ${sortSql(url.searchParams.get("sort"))} LIMIT ? OFFSET ?`).bind(...bindings, limit + 1, offset).all<BaseRow>();
+  const result = await db.prepare(`${cte} SELECT *,${intelligenceColumns("filtered.cve_id")} FROM filtered ORDER BY ${sortSql(url.searchParams.get("sort"))} LIMIT ? OFFSET ?`).bind(...bindings, limit + 1, offset).all<BaseRow>();
   const rows = result.results ?? [];
   return { generatedAt: new Date().toISOString(), rows: rows.slice(0, limit).map(toDashboardRow), nextCursor: rows.length > limit ? encodeCursor(offset + limit) : null };
 }
@@ -144,7 +145,7 @@ async function queryActivity(db: Database, cte: string, bindings: unknown[]): Pr
 
 async function hasPublishedProjection(db: Database): Promise<boolean> {
   try {
-    const state = await db.prepare("SELECT cve_count FROM dashboard_projection_state WHERE id='current' AND status='published'").first<{ cve_count: number }>();
+    const state = await db.prepare("SELECT cve_count FROM dashboard_projection_state WHERE id='current' AND status='published' AND projection_version=2").first<{ cve_count: number }>();
     return Number(state?.cve_count ?? 0) > 0;
   } catch (error) {
     if (error instanceof Error && /no such table:\s*dashboard_projection_state/i.test(error.message)) return false;
@@ -183,7 +184,7 @@ function canonicalParityCte(): string { return `WITH current_epss AS (
   FROM remediation_assertions GROUP BY cve_id
 ), parity_rows AS (
   SELECT c.id cve_id,
-    MAX(CASE WHEN a.id IS NULL THEN 0 ELSE CASE ac.normalized_severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END END) severity_rank,
+    ${severitySql} severity_rank,
     ce.percentile epss_percentile,
     EXISTS(SELECT 1 FROM kev_entries k WHERE k.cve_id=c.id AND k.active=TRUE) kev,
     EXISTS(SELECT 1 FROM exploit_evidence ee WHERE ee.cve_id=c.id AND ee.evidence_type='known_exploitation' AND ee.status='confirmed') known_exploited,
@@ -193,7 +194,7 @@ function canonicalParityCte(): string { return `WITH current_epss AS (
   FROM cves c LEFT JOIN advisory_cves ac ON ac.cve_id=c.id
   LEFT JOIN advisories a ON a.id=ac.advisory_id AND COALESCE(a.published_at,a.source_updated_at)>=(CURRENT_TIMESTAMP + INTERVAL '-${INTELLIGENCE_WINDOW_MONTHS} months')
   LEFT JOIN current_epss ce ON ce.cve_id=c.id LEFT JOIN remediation_flags rf ON rf.cve_id=c.id
-  WHERE a.id IS NOT NULL OR EXISTS(SELECT 1 FROM kev_entries k WHERE k.cve_id=c.id AND k.active=TRUE AND date(k.date_added)>=(CURRENT_TIMESTAMP + INTERVAL '-${INTELLIGENCE_WINDOW_MONTHS} months'))
+  WHERE ${scopePredicate()}
   GROUP BY c.id,ce.percentile
 )`; }
 
@@ -325,6 +326,8 @@ function buildProjectedFilteredCte(params: URLSearchParams): { cte: string; bind
   if (finiteParam(params, "cvssMax") != null) add("cvss <= ?", finiteParam(params, "cvssMax"));
   if (finiteParam(params, "epssPercentileMin") != null) add("epss_percentile >= ?", finiteParam(params, "epssPercentileMin"));
   if (finiteParam(params, "epssMin") != null) add("epss >= ?", finiteParam(params, "epssMin"));
+  booleanFilterOuter(params, add, "vulncheck", "EXISTS(SELECT 1 FROM vulncheck_entries vf WHERE vf.cve_id=cve_dashboard_facts.cve_id AND vf.active=TRUE)");
+  if (params.get("exploitationSource")) add("EXISTS(SELECT 1 FROM exploit_evidence sf WHERE sf.cve_id=cve_dashboard_facts.cve_id AND sf.source_id=? AND sf.evidence_type='known_exploitation' AND sf.status='confirmed')",params.get("exploitationSource"));
   booleanFilterOuter(params, add, "kev", "kev");
   booleanFilterOuter(params, add, "exploited", "known_exploited");
   booleanFilterOuter(params, add, "zeroDay", "zero_day");
@@ -345,19 +348,24 @@ function buildCanonicalFilteredCte(params: URLSearchParams): { cte: string; bind
   const add = (condition: string, ...values: unknown[]) => { where.push(condition); bindings.push(...values); };
   if (params.get("vendor")) add("a.vendor_id = ?", params.get("vendor"));
   if (params.get("product")) add("EXISTS(SELECT 1 FROM affected_products apf JOIN products pf ON pf.id=apf.product_id WHERE apf.advisory_id=a.id AND apf.advisory_revision_id=ar.id AND (apf.cve_id=c.id OR apf.cve_id IS NULL) AND pf.name ILIKE ?)", `%${escapeLike(params.get("product")!)}%`);
-  if (params.get("severity")) add("a.id IS NOT NULL AND ac.normalized_severity = ?", params.get("severity")!.toLowerCase());
-  if (params.get("q")) { const term = `%${escapeLike(params.get("q")!.slice(0, 100))}%`; add("(c.id ILIKE ? OR a.title ILIKE ? OR (a.id IS NOT NULL AND ac.vendor_description ILIKE ?) OR v.name ILIKE ? OR EXISTS(SELECT 1 FROM affected_products aps JOIN products ps ON ps.id=aps.product_id WHERE aps.advisory_id=a.id AND aps.advisory_revision_id=ar.id AND (aps.cve_id=c.id OR aps.cve_id IS NULL) AND ps.name ILIKE ?))", term, term, term, term, term); }
-  if (params.get("publishedFrom")) add("date(a.published_at) >= date(?)", params.get("publishedFrom"));
-  if (params.get("publishedTo")) add("date(a.published_at) <= date(?)", params.get("publishedTo"));
-  if (params.get("modifiedFrom")) add("date(a.source_updated_at) >= date(?)", params.get("modifiedFrom"));
-  if (params.get("modifiedTo")) add("date(a.source_updated_at) <= date(?)", params.get("modifiedTo"));
   const booleanFilter = (key: string, expression: string) => { const value = params.get(key); if (value === "true" || value === "false") add(`${expression} = ?`, value === "true"); };
+  booleanFilter("vulncheck", "EXISTS(SELECT 1 FROM vulncheck_entries vf WHERE vf.cve_id=c.id AND vf.active=TRUE)");
+  if (params.get("exploitationSource")) { where.push("EXISTS(SELECT 1 FROM exploit_evidence sf WHERE sf.cve_id=c.id AND sf.source_id=? AND sf.evidence_type='known_exploitation' AND sf.status='confirmed')"); bindings.push(params.get("exploitationSource")); }
   booleanFilter("kev", "EXISTS(SELECT 1 FROM kev_entries kf WHERE kf.cve_id=c.id AND kf.active=TRUE)");
   booleanFilter("exploited", "EXISTS(SELECT 1 FROM exploit_evidence ef WHERE ef.cve_id=c.id AND ef.evidence_type='known_exploitation' AND ef.status='confirmed')");
   booleanFilter("zeroDay", "EXISTS(SELECT 1 FROM exploit_evidence zf WHERE zf.cve_id=c.id AND zf.evidence_type='zero_day' AND zf.status='confirmed')");
 
   const outer = ["1=1"];
   const addOuter = (condition: string, ...values: unknown[]) => { outer.push(condition); bindings.push(...values); };
+  if (params.get("q")) {
+    const term = `%${escapeLike(params.get("q")!.slice(0, 100))}%`;
+    addOuter("(cve_id ILIKE ? OR title ILIKE ? OR vendor ILIKE ? OR product ILIKE ?)", term, term, term, term);
+  }
+  if (params.get("publishedFrom")) addOuter("published_at >= ?", params.get("publishedFrom"));
+  if (params.get("publishedTo")) addOuter("published_at < (?::date + INTERVAL '1 day')", params.get("publishedTo"));
+  if (params.get("modifiedFrom")) addOuter("modified_at >= ?", params.get("modifiedFrom"));
+  if (params.get("modifiedTo")) addOuter("modified_at < (?::date + INTERVAL '1 day')", params.get("modifiedTo"));
+  if(params.get("severity")) addOuter("severity_rank=?", ({critical:4,high:3,medium:2,low:1} as Record<string,number>)[params.get("severity")!.toLowerCase()] ?? 0);
   if (finiteParam(params, "cvssMin") != null) addOuter("cvss >= ?", finiteParam(params, "cvssMin"));
   if (finiteParam(params, "cvssMax") != null) addOuter("cvss <= ?", finiteParam(params, "cvssMax"));
   if (finiteParam(params, "epssPercentileMin") != null) addOuter("epss_percentile >= ?", finiteParam(params, "epssPercentileMin"));
@@ -408,17 +416,17 @@ function buildCanonicalFilteredCte(params: URLSearchParams): { cte: string; bind
     FROM remediation_assertions GROUP BY cve_id
   ), base AS (
     SELECT c.id cve_id, COALESCE(c.description, MAX(CASE WHEN a.id IS NOT NULL THEN ac.vendor_description END), MAX(a.title), c.id) title,
-      COALESCE(STRING_AGG(DISTINCT v.name, ',' ORDER BY v.name),'CISA KEV') vendor,
+      COALESCE(STRING_AGG(DISTINCT v.name, ',' ORDER BY v.name),CASE WHEN EXISTS(SELECT 1 FROM kev_entries vk WHERE vk.cve_id=c.id AND vk.active=TRUE) THEN 'CISA KEV' ELSE 'Unattributed · VulnCheck' END) vendor,
       pn.product,
-      MAX(CASE WHEN a.id IS NULL THEN 0 ELSE CASE ac.normalized_severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END END) severity_rank,
-      MAX(CASE WHEN a.id IS NOT NULL THEN ac.vendor_cvss_score END) cvss, ce.score epss, ce.percentile epss_percentile,
+      ${severitySql} severity_rank,
+      COALESCE(MAX(CASE WHEN a.id IS NOT NULL THEN ac.vendor_cvss_score END),c.cvss_score) cvss, ce.score epss, ce.percentile epss_percentile,
       EXISTS(SELECT 1 FROM kev_entries k WHERE k.cve_id=c.id AND k.active=TRUE) kev,
       EXISTS(SELECT 1 FROM exploit_evidence ee WHERE ee.cve_id=c.id AND ee.evidence_type='known_exploitation' AND ee.status='confirmed') known_exploited,
       EXISTS(SELECT 1 FROM exploit_evidence ee WHERE ee.cve_id=c.id AND ee.evidence_type='zero_day' AND ee.status='confirmed') zero_day,
       BOOL_OR(rf.patch_available) patch_available,
       COALESCE(BOOL_OR(rf.mitigation_available),FALSE) mitigation_available,
       COALESCE(BOOL_OR(rf.workaround_available),FALSE) workaround_available,
-      MIN(a.published_at) published_at, MAX(a.source_updated_at) modified_at, c.cwe
+      COALESCE(MIN(a.published_at),c.published_at) published_at, COALESCE(MAX(a.source_updated_at),c.modified_at) modified_at, c.cwe
     FROM cves c
       LEFT JOIN advisory_cves ac ON ac.cve_id=c.id
       LEFT JOIN advisories a ON a.id=ac.advisory_id AND COALESCE(a.published_at,a.source_updated_at)>=(CURRENT_TIMESTAMP + INTERVAL '-${INTELLIGENCE_WINDOW_MONTHS} months')
@@ -427,7 +435,7 @@ function buildCanonicalFilteredCte(params: URLSearchParams): { cte: string; bind
       LEFT JOIN current_epss ce ON ce.cve_id=c.id
       LEFT JOIN product_names pn ON pn.cve_id=c.id
       LEFT JOIN remediation_flags rf ON rf.cve_id=c.id
-    WHERE (a.id IS NOT NULL OR EXISTS(SELECT 1 FROM kev_entries scope_kev WHERE scope_kev.cve_id=c.id AND scope_kev.active=TRUE AND date(scope_kev.date_added)>=(CURRENT_TIMESTAMP + INTERVAL '-${INTELLIGENCE_WINDOW_MONTHS} months'))) AND ${where.join(" AND ")}
+    WHERE ${scopePredicate()} AND ${where.join(" AND ")}
     GROUP BY c.id, ce.score, ce.percentile, pn.product
   ), filtered AS (SELECT * FROM base WHERE ${outer.join(" AND ")})`;
   return { cte, bindings };
@@ -447,23 +455,27 @@ async function queryChanges(db: Database, cte: string, bindings: unknown[]): Pro
 }
 
 async function querySourceHealth(db: Database): Promise<SourceHealth[]> {
-  const result = await db.prepare(`SELECT s.id source_id, s.name, r.started_at last_attempt,
+  const result = await db.prepare(`SELECT s.id source_id, s.name, s.readiness, s.readiness_reason, s.enabled, r.started_at last_attempt,
     (SELECT completed_at FROM source_runs ok WHERE ok.source_id=s.id AND (ok.status IN ('success','unchanged') OR (ok.status='partial' AND ok.records_failed=0)) ORDER BY ok.completed_at DESC LIMIT 1) last_success,
     (SELECT started_at FROM source_runs bad WHERE bad.source_id=s.id AND (bad.status='failed' OR bad.records_failed>0) ORDER BY bad.started_at DESC LIMIT 1) last_failure,
     CAST(EXTRACT(EPOCH FROM (r.completed_at-r.started_at))*1000 AS BIGINT) duration_ms, r.status result, r.ingestion_mode,
     COALESCE(r.records_discovered,0) discovered, COALESCE(r.records_inserted,0) inserted, COALESCE(r.records_changed,0) changed, COALESCE(r.records_unchanged,0) unchanged, COALESCE(r.records_failed,0) failed, COALESCE(r.bound_hit,FALSE) bound_hit, r.error_summary,
+    (SELECT MIN(coverage_start) FROM ingestion_checkpoints cov WHERE cov.source_id=s.id AND cov.status='complete') coverage_from,
+    (SELECT MAX(coverage_end) FROM ingestion_checkpoints cov WHERE cov.source_id=s.id AND cov.status='complete') coverage_through,
+    (SELECT COUNT(*) FROM enrichment_queue eq WHERE eq.source_id=s.id) queue_total,
+    (SELECT COUNT(*) FROM enrichment_queue eq WHERE eq.source_id=s.id AND (eq.checked_at IS NULL OR eq.checked_at<now()-INTERVAL '7 days')) queue_pending,
     l.expires_at lease_expires_at,
     cp.id checkpoint_id, cp.status checkpoint_status, cp.window_start checkpoint_window_start, cp.window_end checkpoint_window_end
     FROM sources s
     LEFT JOIN source_runs r ON r.id=(SELECT r2.id FROM source_runs r2 WHERE r2.source_id=s.id ORDER BY r2.started_at DESC LIMIT 1)
     LEFT JOIN ingestion_leases l ON l.source_id=s.id
     LEFT JOIN ingestion_checkpoints cp ON cp.id=(SELECT cp2.id FROM ingestion_checkpoints cp2 WHERE cp2.source_id=s.id AND cp2.status<>'complete' ORDER BY cp2.updated_at DESC LIMIT 1)
-    WHERE s.enabled=TRUE ORDER BY s.name`).all<Record<string, unknown>>();
+    ORDER BY s.name`).all<Record<string, unknown>>();
   return (result.results ?? []).map((row) => {
     const lastSuccess = nullableString(row.last_success);
     const leaseExpiresAt = nullableString(row.lease_expires_at);
     return {
-      sourceId: String(row.source_id), name: String(row.name), lastAttempt: nullableString(row.last_attempt), lastSuccess, lastFailure: nullableString(row.last_failure),
+      coverage:{from:nullableString(row.coverage_from),through:nullableString(row.coverage_through)}, enrichmentQueue:{total:Number(row.queue_total),pending:Number(row.queue_pending)}, readiness: String(row.readiness) as SourceHealth["readiness"], readinessReason: nullableString(row.readiness_reason), enabled: Boolean(row.enabled), sourceId: String(row.source_id), name: String(row.name), lastAttempt: nullableString(row.last_attempt), lastSuccess, lastFailure: nullableString(row.last_failure),
       durationMs: row.duration_ms == null ? null : Number(row.duration_ms), result: nullableString(row.result), mode: nullableString(row.ingestion_mode),
       freshness: !lastSuccess ? "never" : Date.now() - new Date(lastSuccess).getTime() > 36 * 60 * 60 * 1000 ? "stale" : "fresh",
       discovered: Number(row.discovered ?? 0), inserted: Number(row.inserted ?? 0), changed: Number(row.changed ?? 0), unchanged: Number(row.unchanged ?? 0), failed: Number(row.failed ?? 0), boundHit: Boolean(row.bound_hit), errorSummary: nullableString(row.error_summary),
@@ -575,7 +587,7 @@ function parseProductFamilies(value: unknown): Array<{ label: string; value: num
 function toDashboardRow(row: BaseRow): DashboardVulnerabilityRow {
   const severity = severityFromRank(row.severity_rank).toLowerCase() as NormalizedSeverity;
   const knownExploited = Boolean(row.known_exploited); const kev = Boolean(row.kev);
-  return { cveId: row.cve_id, title: row.title, vendor: row.vendor, product: row.product, severity, cvss: nullableNumber(row.cvss), epss: nullableNumber(row.epss), epssPercentile: nullableNumber(row.epss_percentile), kev, knownExploited, zeroDay: Boolean(row.zero_day), patchAvailable: row.patch_available == null ? null : Boolean(row.patch_available), mitigationAvailable: Boolean(row.mitigation_available), workaroundAvailable: Boolean(row.workaround_available), publishedAt: row.published_at, modifiedAt: row.modified_at, priority: calculatePriority({ kev, exploitationStatus: knownExploited ? "known_exploited" : "unknown", severity, cvss: nullableNumber(row.cvss), epssPercentile: nullableNumber(row.epss_percentile) }) };
+  return { vulncheck: Boolean(row.vulncheck), exploitationSources: Array.isArray(row.exploitation_sources) ? row.exploitation_sources : JSON.parse(row.exploitation_sources ?? "[]"), assessmentSource: row.assessment_source ?? null, cveId: row.cve_id, title: row.title, vendor: row.vendor, product: row.product, severity, cvss: nullableNumber(row.cvss), epss: nullableNumber(row.epss), epssPercentile: nullableNumber(row.epss_percentile), kev, knownExploited, zeroDay: Boolean(row.zero_day), patchAvailable: row.patch_available == null ? null : Boolean(row.patch_available), mitigationAvailable: Boolean(row.mitigation_available), workaroundAvailable: Boolean(row.workaround_available), publishedAt: row.published_at, modifiedAt: row.modified_at, priority: calculatePriority({ kev, exploitationStatus: knownExploited ? "known_exploited" : "unknown", severity, cvss: nullableNumber(row.cvss), epssPercentile: nullableNumber(row.epss_percentile) }) };
 }
 
 function severityFromRank(rank: number): string { return rank === 4 ? "Critical" : rank === 3 ? "High" : rank === 2 ? "Medium" : rank === 1 ? "Low" : "Unknown"; }

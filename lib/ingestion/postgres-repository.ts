@@ -1,12 +1,23 @@
 import type { Database, Statement } from "../../db/database";
 import type { ChangeType, NormalizedAdvisory, VendorId } from "../domain/types";
-import type { AdvisoryRef, IngestionRepository, IngestResult, PriorRevision, RunMetadata } from "./contracts";
+import type { AdvisoryRef, DiscoveryPage, IngestionRepository, IngestResult, PriorRevision, RunMetadata } from "./contracts";
 import { hashAdvisory, sha256 } from "./hash";
 import { summarizeChange } from "./pipeline";
-import { PRODUCTION_SOURCE_IDS, SOURCE_CATALOG } from "./source-catalog";
+import { PRODUCTION_SOURCE_IDS, SOURCE_CATALOG, initialReadiness } from "./source-catalog";
 
 export class PostgresIngestionRepository implements IngestionRepository {
   constructor(private readonly db: Database) {}
+
+  async deferSource(sourceId:string,retryAt:string):Promise<void> {
+    await this.db.prepare("UPDATE sources SET retry_after=GREATEST(retry_after,?::timestamptz) WHERE id=?").bind(retryAt,sourceId).run();
+  }
+  async discoveryPage(id: string, sourceId: string, discover: () => Promise<DiscoveryPage>): Promise<DiscoveryPage> {
+    const previous = await this.db.prepare("SELECT refs,next_cursor FROM discovery_pages WHERE id=?").bind(id).first<{refs: string; next_cursor: string | null}>();
+    if (previous) return { refs: typeof previous.refs === "string" ? JSON.parse(previous.refs) : previous.refs, nextCursor: previous.next_cursor };
+    const page = await discover();
+    await this.db.prepare("INSERT INTO discovery_pages(id,source_id,refs,next_cursor) VALUES (?,?,?::jsonb,?) ON CONFLICT DO NOTHING").bind(id,sourceId,JSON.stringify(page.refs),page.nextCursor).run();
+    return page;
+  }
 
   async beginRun(sourceId: string, idempotencyKey: string | undefined, metadata: RunMetadata): Promise<{ runId: string; reused: boolean; continuation: string | null; boundHit: boolean }> {
     return this.db.transaction(async db => {
@@ -17,9 +28,12 @@ export class PostgresIngestionRepository implements IngestionRepository {
 
   private async beginRunLocked(sourceId: string, idempotencyKey: string | undefined, metadata: RunMetadata): Promise<{ runId: string; reused: boolean; continuation: string | null; boundHit: boolean }> {
     if (idempotencyKey) {
-      const existing = await this.db.prepare("SELECT id, status, records_failed, continuation_out, bound_hit FROM source_runs WHERE source_id = ? AND idempotency_key = ? LIMIT 1").bind(sourceId, idempotencyKey).first<{ id: string; status: string; records_failed: number; continuation_out: string | null; bound_hit: number }>();
+      const existing = await this.db.prepare("SELECT id, status, started_at, records_failed, continuation_out, bound_hit FROM source_runs WHERE source_id = ? AND idempotency_key = ? LIMIT 1").bind(sourceId, idempotencyKey).first<{ id: string; status: string; started_at: string; records_failed: number; continuation_out: string | null; bound_hit: number }>();
       if (existing && existing.status !== "running" && existing.status !== "failed" && Number(existing.records_failed) === 0) return { runId: existing.id, reused: true, continuation: existing.continuation_out, boundHit: Boolean(existing.bound_hit) };
-      if (existing?.status === "running") throw new Error("Idempotent ingestion run is still active");
+      if (existing?.status === "running") {
+        if(Date.now()-Date.parse(existing.started_at)<15*60_000)throw new Error("Idempotent ingestion run is still active");
+        await this.db.prepare("UPDATE source_runs SET status='failed',records_failed=GREATEST(records_failed,1),completed_at=now(),error_summary='Interrupted source run recovered' WHERE id=?").bind(existing.id).run();
+      }
       // Preserve the failed/interrupted attempt as audit evidence while allowing a
       // deterministic checkpoint batch to be retried under the same public key.
       if (existing) await this.db.prepare("UPDATE source_runs SET idempotency_key=NULL WHERE id=?").bind(existing.id).run();
@@ -125,12 +139,12 @@ export class PostgresIngestionRepository implements IngestionRepository {
 
 export async function seedIngestionCatalog(db: Database): Promise<void> {
   const now = new Date().toISOString();
-  const vendors = [["microsoft", "Microsoft", "https://msrc.microsoft.com"], ["cisco", "Cisco", "https://sec.cloudapps.cisco.com/security/center/"], ["adobe", "Adobe", "https://helpx.adobe.com/security.html"], ["fortinet", "Fortinet", "https://fortiguard.fortinet.com/psirt"], ["palo-alto", "Palo Alto Networks", "https://security.paloaltonetworks.com"], ["ivanti", "Ivanti", "https://www.ivanti.com/support/product-documentation/security-advisories"], ["vmware-broadcom", "VMware / Broadcom", "https://support.broadcom.com/security-advisories"], ["citrix", "Citrix", "https://support.citrix.com/securitybulletins"], ["chrome", "Google Chrome", "https://chromereleases.googleblog.com"], ["mozilla", "Mozilla", "https://www.mozilla.org/security/advisories/"], ["apple", "Apple", "https://support.apple.com/en-us/100100"], ["oracle", "Oracle", "https://www.oracle.com/security-alerts/"], ["atlassian", "Atlassian", "https://www.atlassian.com/trust/security/advisories"], ["sap", "SAP", "https://support.sap.com/en/my-support/knowledge-base/security-notes-news.html"]];
+  const vendors = [["red-hat", "Red Hat", "https://access.redhat.com/security/data"], ["microsoft", "Microsoft", "https://msrc.microsoft.com"], ["cisco", "Cisco", "https://sec.cloudapps.cisco.com/security/center/"], ["adobe", "Adobe", "https://helpx.adobe.com/security.html"], ["fortinet", "Fortinet", "https://fortiguard.fortinet.com/psirt"], ["palo-alto", "Palo Alto Networks", "https://security.paloaltonetworks.com"], ["ivanti", "Ivanti", "https://www.ivanti.com/support/product-documentation/security-advisories"], ["vmware-broadcom", "VMware / Broadcom", "https://support.broadcom.com/security-advisories"], ["citrix", "Citrix", "https://support.citrix.com/securitybulletins"], ["chrome", "Google Chrome", "https://chromereleases.googleblog.com"], ["mozilla", "Mozilla", "https://www.mozilla.org/security/advisories/"], ["apple", "Apple", "https://support.apple.com/en-us/100100"], ["oracle", "Oracle", "https://www.oracle.com/security-alerts/"], ["atlassian", "Atlassian", "https://www.atlassian.com/trust/security/advisories"], ["sap", "SAP", "https://support.sap.com/en/my-support/knowledge-base/security-notes-news.html"]];
   const statements: Statement[] = vendors.map(([id, name, url]) => db.prepare("INSERT INTO vendors (id, name, homepage_url, created_at, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, homepage_url=excluded.homepage_url, updated_at=excluded.updated_at").bind(id, name, url, now, now));
   const productionSources = new Set<string>(PRODUCTION_SOURCE_IDS);
   for (const source of SOURCE_CATALOG) {
     const enabled = productionSources.has(source.id);
-    statements.push(db.prepare("INSERT INTO sources (id, vendor_id, name, kind, discovery_url, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET vendor_id=excluded.vendor_id, name=excluded.name, kind=excluded.kind, discovery_url=excluded.discovery_url, enabled=excluded.enabled, updated_at=excluded.updated_at").bind(source.id, source.vendorId, source.name, source.kind, source.discoveryUrl, enabled, now, now));
+    statements.push(db.prepare("INSERT INTO sources (id, vendor_id, name, kind, discovery_url, enabled, readiness, readiness_reason, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET vendor_id=excluded.vendor_id, name=excluded.name, kind=excluded.kind, discovery_url=excluded.discovery_url, updated_at=excluded.updated_at").bind(source.id, source.vendorId, source.name, source.kind, source.discoveryUrl, enabled, initialReadiness(source.id).state, initialReadiness(source.id).reason, now, now));
   }
   await db.batch(statements);
 }
