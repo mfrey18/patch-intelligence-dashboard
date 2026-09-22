@@ -32,7 +32,14 @@ export async function pruneRollingRetention(db: Database, now = new Date()): Pro
       GROUP BY date_trunc('week',score_date)
     )`).bind(cutoff, dailyCutoff, cutoff, dailyCutoff).run();
   const datasets = await db.prepare("DELETE FROM epss_datasets WHERE is_current=FALSE AND NOT EXISTS(SELECT 1 FROM epss_observations eo WHERE eo.score_date=epss_datasets.score_date)").run();
-  const checkpoints = await db.prepare("DELETE FROM ingestion_checkpoints WHERE status='complete' AND completed_at < ?").bind(checkpointCutoff).run();
+  // Keep Cisco's latest scheduled coverage boundary even after a long outage.
+  // Losing this watermark would make the next daily run skip straight to the
+  // default lookback instead of covering the gap since the last completion.
+  const checkpoints = await db.prepare(`DELETE FROM ingestion_checkpoints WHERE status='complete' AND completed_at < ?
+    AND id IS DISTINCT FROM (SELECT retained.id FROM ingestion_checkpoints retained
+      WHERE retained.source_id='cisco-psirt-csaf' AND retained.mode='delta' AND retained.status='complete'
+        AND (retained.id LIKE 'daily:cisco-psirt-csaf:%' OR retained.id LIKE 'daily:cisco:%')
+      ORDER BY retained.coverage_end DESC, retained.completed_at DESC, retained.id DESC LIMIT 1)`).bind(checkpointCutoff).run();
   const abandonedRuns = await db.prepare("UPDATE source_runs SET status='failed', completed_at=?, records_failed=GREATEST(records_failed,1), error_summary=COALESCE(error_summary,'Ingestion lease expired before the run completed') WHERE status='running' AND started_at < ?").bind(now.toISOString(), new Date(now.getTime() - 15 * 60_000).toISOString()).run();
   const leases = await db.prepare("DELETE FROM ingestion_leases WHERE expires_at < ?").bind(now.toISOString()).run();
   return { cutoff, dailyCutoff, epssObservations: changes(expiredObservations) + changes(downsampledObservations), epssDatasets: changes(datasets), completedCheckpoints: changes(checkpoints), abandonedRuns: changes(abandonedRuns), expiredLeases: changes(leases), preservedAuditHistory: true };

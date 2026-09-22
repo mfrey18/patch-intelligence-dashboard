@@ -13,7 +13,9 @@ The `Production operations monitor` GitHub Actions workflow runs daily after the
 - checks that projection state count matches the stored fact count;
 - detects a projection older than, or behind, successful ingestion;
 - checks the six production sources for freshness and newer failures;
-- reports repeated Free-plan batch-bound hits;
+- treats a scheduled Cisco run as fresh only after its `daily:cisco-psirt-csaf:*` checkpoint is `complete`; partial batches remain pending and cannot satisfy the daily cycle;
+- reports Cisco progress separately from failure: bound hits during advancing pending work are expected, while repeated identical continuations, a pending checkpoint older than 36 hours, or failed requests raise alerts;
+- reports repeated Free-plan batch-bound hits for sources whose checkpoint is not making normal resumable progress;
 - reports active ingestion or projection leases;
 - measures the dashboard core query and warns above 1,000 ms;
 - queries D1 size and rolling 24-hour row usage with narrowly scoped Cloudflare deployment credentials, warns at 4,000,000 rows read or 80,000 rows written, and fails at 400,000,000 bytes;
@@ -38,7 +40,8 @@ Parity covers total CVEs, Critical, High, known exploitation, CISA KEV, zero-day
 
 - `projection_missing`, `projection_count_mismatch`, or `projection_parity_unverified`: stop publication changes and inspect the latest projection attempt.
 - `projection_behind_ingestion`: run one authenticated projection refresh after confirming ingestion is idle.
-- `source_stale` or `source_latest_attempt_failed`: investigate only that source; do not disable other adapters.
+- `source_stale` or `source_latest_attempt_failed`: investigate only that source; do not disable other adapters. A Cisco partial batch is not a successful daily cycle; check its completed checkpoint and pending backlog state.
+- `source_pending_stalled` or `source_pending_backlog_stale`: inspect the oldest scheduled Cisco checkpoint and its continuation/window movement. Progressing pending work does not produce a bound alert, but a repeated continuation or a backlog older than 36 hours requires intervention.
 - `source_repeated_bound_hits`: inspect the checkpoint and increase workflow attempts only if each Worker invocation remains within the configured bound.
 - `ingestion_lease_active` or `projection_lease_active`: confirm a run is actually active; retention clears expired operational state.
 - `dashboard_core_slow`: inspect structured `dashboard_query` logs and the archived D1 baseline before changing indexes.

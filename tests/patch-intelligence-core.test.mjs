@@ -28,6 +28,19 @@ test("ingestion batches expose partial vendor results at the outer API boundary"
   });
 });
 
+test("unfinished checkpoints and contention remain pending without hiding failures", () => {
+  for (const status of ["success", "unchanged", "partial", "pending"]) {
+    assert.deepEqual(ingestionBatchOutcome([{ status, counts: { failed: 0 }, checkpoint: { status: "pending" } }]), { status: "pending", httpStatus: 202 });
+  }
+  assert.deepEqual(ingestionBatchOutcome([{ status: "skipped" }]), { status: "pending", httpStatus: 202 });
+  for (const result of [
+    { status: "pending", counts: { failed: 1 }, checkpoint: { status: "pending" } },
+    { status: "partial", counts: { failed: 1 }, checkpoint: { status: "failed" } },
+    { status: "success", checkpoint: { status: "failed" } },
+  ]) assert.deepEqual(ingestionBatchOutcome([result, { status: "pending" }]), { status: "partial", httpStatus: 207 });
+  assert.deepEqual(ingestionBatchOutcome([{ status: "unchanged", checkpoint: { status: "complete" } }]), { status: "success", httpStatus: 200 });
+});
+
 test("priority is explainable and keeps KEV and known exploitation independently visible", () => {
   const result = calculatePriority({
     kev: true,

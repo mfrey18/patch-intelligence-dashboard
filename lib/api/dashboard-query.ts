@@ -456,29 +456,42 @@ async function queryChanges(db: Database, cte: string, bindings: unknown[]): Pro
 
 async function querySourceHealth(db: Database): Promise<SourceHealth[]> {
   const result = await db.prepare(`SELECT s.id source_id, s.name, s.readiness, s.readiness_reason, s.enabled, r.started_at last_attempt,
-    (SELECT completed_at FROM source_runs ok WHERE ok.source_id=s.id AND (ok.status IN ('success','unchanged') OR (ok.status='partial' AND ok.records_failed=0)) ORDER BY ok.completed_at DESC LIMIT 1) last_success,
+    CASE WHEN s.id='cisco-psirt-csaf' THEN
+      (SELECT MAX(cp_done.completed_at) FROM ingestion_checkpoints cp_done WHERE cp_done.source_id=s.id AND cp_done.mode='delta' AND (cp_done.id LIKE 'daily:cisco-psirt-csaf:%' OR cp_done.id LIKE 'daily:cisco:%') AND cp_done.status='complete')
+      ELSE (SELECT completed_at FROM source_runs ok WHERE ok.source_id=s.id AND (ok.status IN ('success','unchanged') OR (ok.status='partial' AND ok.records_failed=0)) ORDER BY ok.completed_at DESC LIMIT 1)
+    END last_success,
     (SELECT started_at FROM source_runs bad WHERE bad.source_id=s.id AND (bad.status='failed' OR bad.records_failed>0) ORDER BY bad.started_at DESC LIMIT 1) last_failure,
     CAST(EXTRACT(EPOCH FROM (r.completed_at-r.started_at))*1000 AS BIGINT) duration_ms, r.status result, r.ingestion_mode,
     COALESCE(r.records_discovered,0) discovered, COALESCE(r.records_inserted,0) inserted, COALESCE(r.records_changed,0) changed, COALESCE(r.records_unchanged,0) unchanged, COALESCE(r.records_failed,0) failed, COALESCE(r.bound_hit,FALSE) bound_hit, r.error_summary,
-    (SELECT MIN(coverage_start) FROM ingestion_checkpoints cov WHERE cov.source_id=s.id AND cov.status='complete') coverage_from,
-    (SELECT MAX(coverage_end) FROM ingestion_checkpoints cov WHERE cov.source_id=s.id AND cov.status='complete') coverage_through,
+    (SELECT MIN(coverage_start) FROM ingestion_checkpoints cov WHERE cov.source_id=s.id AND cov.status='complete' AND (s.id<>'cisco-psirt-csaf' OR (cov.mode='delta' AND (cov.id LIKE 'daily:cisco-psirt-csaf:%' OR cov.id LIKE 'daily:cisco:%')))) coverage_from,
+    (SELECT MAX(coverage_end) FROM ingestion_checkpoints cov WHERE cov.source_id=s.id AND cov.status='complete' AND (s.id<>'cisco-psirt-csaf' OR (cov.mode='delta' AND (cov.id LIKE 'daily:cisco-psirt-csaf:%' OR cov.id LIKE 'daily:cisco:%')))) coverage_through,
     (SELECT COUNT(*) FROM enrichment_queue eq WHERE eq.source_id=s.id) queue_total,
     (SELECT COUNT(*) FROM enrichment_queue eq WHERE eq.source_id=s.id AND (eq.checked_at IS NULL OR eq.checked_at<now()-INTERVAL '7 days')) queue_pending,
     l.expires_at lease_expires_at,
-    cp.id checkpoint_id, cp.status checkpoint_status, cp.window_start checkpoint_window_start, cp.window_end checkpoint_window_end
+    cp.id checkpoint_id, cp.status checkpoint_status, cp.window_start checkpoint_window_start, cp.window_end checkpoint_window_end,
+    (cp.status IN ('pending','running')) pending,
+    (SELECT MAX(progress.completed_at) FROM source_runs progress JOIN ingestion_checkpoints progress_cp ON progress_cp.id=progress.checkpoint_id WHERE progress.source_id=s.id AND progress_cp.id=cp.id AND progress_cp.status IN ('pending','running') AND progress.records_failed=0 AND progress.status IN ('partial','success','unchanged') AND (progress.continuation_out IS DISTINCT FROM progress.continuation_in OR progress.bound_hit=FALSE)) pending_progress_at,
+    (SELECT MIN(pending_cp.created_at) FROM ingestion_checkpoints pending_cp WHERE pending_cp.source_id=s.id AND pending_cp.status IN ('pending','running','failed') AND (s.id<>'cisco-psirt-csaf' OR (pending_cp.mode='delta' AND (pending_cp.id LIKE 'daily:cisco-psirt-csaf:%' OR pending_cp.id LIKE 'daily:cisco:%')))) pending_created_at
     FROM sources s
     LEFT JOIN source_runs r ON r.id=(SELECT r2.id FROM source_runs r2 WHERE r2.source_id=s.id ORDER BY r2.started_at DESC LIMIT 1)
     LEFT JOIN ingestion_leases l ON l.source_id=s.id
-    LEFT JOIN ingestion_checkpoints cp ON cp.id=(SELECT cp2.id FROM ingestion_checkpoints cp2 WHERE cp2.source_id=s.id AND cp2.status<>'complete' ORDER BY cp2.updated_at DESC LIMIT 1)
+    LEFT JOIN ingestion_checkpoints cp ON cp.id=(SELECT cp2.id FROM ingestion_checkpoints cp2 WHERE cp2.source_id=s.id AND cp2.status<>'complete' AND (s.id<>'cisco-psirt-csaf' OR (cp2.mode='delta' AND (cp2.id LIKE 'daily:cisco-psirt-csaf:%' OR cp2.id LIKE 'daily:cisco:%'))) ORDER BY CASE WHEN s.id='cisco-psirt-csaf' THEN cp2.created_at END ASC NULLS LAST, CASE WHEN s.id<>'cisco-psirt-csaf' THEN cp2.updated_at END DESC NULLS LAST, cp2.id ASC LIMIT 1)
     ORDER BY s.name`).all<Record<string, unknown>>();
   return (result.results ?? []).map((row) => {
     const lastSuccess = nullableString(row.last_success);
+    const pending = Boolean(row.pending);
+    const failed = Number(row.failed ?? 0);
+    const result = row.source_id === "cisco-psirt-csaf" && row.checkpoint_status === "failed" ? "failed" : row.source_id === "cisco-psirt-csaf" && pending && failed === 0 && row.result !== "failed" ? "pending" : nullableString(row.result);
+    const coverageThrough = nullableString(row.coverage_through);
+    const lastSuccessAgeHours = lastSuccess == null ? null : (Date.now() - new Date(lastSuccess).getTime()) / 3_600_000;
+    const coverageAgeHours = coverageThrough == null ? null : (Date.now() - new Date(coverageThrough).getTime()) / 3_600_000;
     const leaseExpiresAt = nullableString(row.lease_expires_at);
     return {
-      coverage:{from:nullableString(row.coverage_from),through:nullableString(row.coverage_through)}, enrichmentQueue:{total:Number(row.queue_total),pending:Number(row.queue_pending)}, readiness: String(row.readiness) as SourceHealth["readiness"], readinessReason: nullableString(row.readiness_reason), enabled: Boolean(row.enabled), sourceId: String(row.source_id), name: String(row.name), lastAttempt: nullableString(row.last_attempt), lastSuccess, lastFailure: nullableString(row.last_failure),
-      durationMs: row.duration_ms == null ? null : Number(row.duration_ms), result: nullableString(row.result), mode: nullableString(row.ingestion_mode),
-      freshness: !lastSuccess ? "never" : Date.now() - new Date(lastSuccess).getTime() > 36 * 60 * 60 * 1000 ? "stale" : "fresh",
-      discovered: Number(row.discovered ?? 0), inserted: Number(row.inserted ?? 0), changed: Number(row.changed ?? 0), unchanged: Number(row.unchanged ?? 0), failed: Number(row.failed ?? 0), boundHit: Boolean(row.bound_hit), errorSummary: nullableString(row.error_summary),
+      coverage:{from:nullableString(row.coverage_from),through:coverageThrough}, enrichmentQueue:{total:Number(row.queue_total),pending:Number(row.queue_pending)}, readiness: String(row.readiness) as SourceHealth["readiness"], readinessReason: nullableString(row.readiness_reason), enabled: Boolean(row.enabled), sourceId: String(row.source_id), name: String(row.name), lastAttempt: nullableString(row.last_attempt), lastSuccess, lastFailure: nullableString(row.last_failure),
+      durationMs: row.duration_ms == null ? null : Number(row.duration_ms), result, mode: nullableString(row.ingestion_mode),
+      freshness: !lastSuccess ? "never" : lastSuccessAgeHours! > 36 || (String(row.source_id) === "cisco-psirt-csaf" && (coverageAgeHours == null || coverageAgeHours > 36)) ? "stale" : "fresh",
+      pending, pendingProgressAt: nullableString(row.pending_progress_at), pendingBacklogAgeHours: row.pending_created_at == null ? null : Math.max(0, (Date.now() - new Date(String(row.pending_created_at)).getTime()) / 3_600_000),
+      discovered: Number(row.discovered ?? 0), inserted: Number(row.inserted ?? 0), changed: Number(row.changed ?? 0), unchanged: Number(row.unchanged ?? 0), failed, boundHit: Boolean(row.bound_hit), errorSummary: nullableString(row.error_summary),
       lease: { active: Boolean(leaseExpiresAt && new Date(leaseExpiresAt) > new Date()), expiresAt: leaseExpiresAt },
       checkpoint: row.checkpoint_id ? { id: String(row.checkpoint_id), status: String(row.checkpoint_status), windowStart: String(row.checkpoint_window_start), windowEnd: String(row.checkpoint_window_end) } : null,
     } satisfies SourceHealth;

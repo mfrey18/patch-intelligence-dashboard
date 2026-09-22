@@ -60,9 +60,6 @@ jobs:
           # recently modified documents. Each attempt remains capped at 12
           # advisory fetches for Workers Free; the workflow resumes checkpoints.
           - { source: microsoft-msrc-csaf, max_attempts: 50, batch_size: 12 }
-          # Cisco CSAF documents can individually contain tens of thousands of
-          # relational assertions. Give each document its own Free invocation.
-          - { source: cisco-psirt-csaf, max_attempts: 4, batch_size: 1 }
           - { source: palo-alto-psirt-csaf, max_attempts: 4, batch_size: 12 }
           - { source: mozilla-mfsa-yaml, max_attempts: 4, batch_size: 12 }
     name: Daily source — ${{ matrix.source }}
@@ -94,6 +91,43 @@ jobs:
           done
           echo "Source repeatedly reached the configured batch bound" >&2
           exit 1
+
+  cisco:
+    if: github.event_name == 'schedule' && github.event.schedule == '17 7 * * *' && vars.ENABLE_SCHEDULED_INGESTION == 'true'
+    environment: production-ingestion
+    runs-on: ubuntu-latest
+    outputs:
+      daily_status: ${{ steps.cisco-run.outputs.daily_status }}
+      daily_complete: ${{ steps.cisco-run.outputs.daily_complete }}
+      daily_alert: ${{ steps.cisco-run.outputs.daily_alert }}
+    name: Process scheduled Cisco batches
+    steps:
+      - uses: tailscale/github-action@v4
+        if: vars.DATABASE_BACKEND == 'postgres'
+        with:
+          oauth-client-id: ${{ vars.TS_OIDC_CLIENT_ID }}
+          audience: ${{ vars.TS_AUDIENCE }}
+          tags: tag:patch-ci
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Run Cisco scheduled delta
+        id: cisco-run
+        env:
+          API_ORIGIN: ${{ vars.DATABASE_BACKEND == 'postgres' && vars.PRIVATE_API_BASE_URL || vars.PUBLIC_API_BASE_URL }}
+          INGEST_SECRET: ${{ secrets[vars.DATABASE_BACKEND == 'postgres' && 'NATIVE_INGEST_SECRET' || 'INGEST_SECRET'] }}
+          CISCO_MAX_BATCHES: '50'
+          CISCO_MAX_DURATION_MS: '600000'
+        run: |
+          test -n "$API_ORIGIN" && test -n "$INGEST_SECRET"
+          node scripts/daily-ingestion.mjs
+      - name: Record resumable Cisco continuation
+        if: steps.cisco-run.outputs.daily_status == 'pending'
+        run: echo "::notice title=Cisco ingestion pending::Cisco checkpoint remains resumable; this scheduled run did not complete a daily cycle."
+      - name: Confirm completed Cisco daily cycle
+        if: steps.cisco-run.outputs.daily_status == 'complete'
+        run: echo "Cisco reached a fresh complete coverage window."
 
   patch-tuesday:
     if: github.event_name == 'schedule' && github.event.schedule == '47 8 * * 2' && vars.ENABLE_SCHEDULED_INGESTION == 'true'
@@ -176,7 +210,7 @@ jobs:
 
   housekeeping:
     if: always() && github.event_name == 'schedule' && github.event.schedule == '17 7 * * *' && vars.ENABLE_SCHEDULED_INGESTION == 'true'
-    needs: daily
+    needs: [daily, cisco]
     environment: production-ingestion
     runs-on: ubuntu-latest
     steps:
@@ -207,6 +241,14 @@ jobs:
           echo "$monitor" | jq .
           echo "$monitor" | jq -r '.alerts[] | "::warning title=\(.code)::\(.message)"'
           echo "$monitor" | jq -e '.status != "unhealthy" and .projection.parityStatus == "passed" and .projection.actualCount > 0 and (.sources | length) >= 6'
+
+  daily-cycle-complete:
+    if: github.event_name == 'schedule' && github.event.schedule == '17 7 * * *' && vars.ENABLE_SCHEDULED_INGESTION == 'true' && needs.daily.result == 'success' && needs.cisco.result == 'success' && needs.housekeeping.result == 'success' && needs.cisco.outputs.daily_complete == 'true'
+    needs: [daily, cisco, housekeeping]
+    runs-on: ubuntu-latest
+    name: Daily cycle complete
+    steps:
+      - run: echo "All scheduled sources and a fresh Cisco coverage window completed."
 
   expansion:
     if: github.event_name == 'schedule' && github.event.schedule == '27 * * * *' && vars.ENABLE_SCHEDULED_INGESTION == 'true' && vars.DATABASE_BACKEND == 'postgres'
