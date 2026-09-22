@@ -9,7 +9,7 @@ const sourceIds = ["cisa-kev", "first-epss", "microsoft-msrc-csaf", "cisco-psirt
 
 function monitorDb(overrides = {}) {
   const state = { generated_at: "2026-08-26T11:00:00.000Z", cve_count: 7, parity_status: "passed", parity_checked_at: "2026-08-26T11:00:00.000Z", last_attempt_status: "success", last_attempt_at: "2026-08-26T11:00:00.000Z", last_attempt_error: null, ...overrides.state };
-  const sources = sourceIds.map((sourceId) => ({ source_id: sourceId, last_attempt: "2026-08-26T10:00:00.000Z", last_success: "2026-08-26T10:00:00.000Z", last_failure: null, result: "success", failed: 0, failures_24h: 0, bound_hits_24h: 0, ...overrides.source }));
+  const sources = sourceIds.map((sourceId) => ({ source_id: sourceId, last_attempt: "2026-08-26T10:00:00.000Z", last_success: "2026-08-26T10:00:00.000Z", last_failure: null, result: "success", failed: 0, failures_24h: 0, bound_hits_24h: 0, ...overrides.source, ...(overrides.sources?.[sourceId] ?? {}) }));
   return {
     prepare(sql) {
       return {
@@ -69,6 +69,36 @@ test("batch pressure alerts target unresolved operational checkpoints", async ()
   assert.match(sourceQuery, /bh\.ingestion_mode IN \('delta','patch_tuesday'\)/);
   assert.match(sourceQuery, /cp\.status IN \('pending','running','failed'\)/);
   assert.match(sourceQuery, /JOIN ingestion_checkpoints cp ON cp\.id=bh\.checkpoint_id/);
+});
+
+test("advancing scheduled Cisco pending work is not a successful cycle or a bound alarm", async () => {
+  const result = await captureOperationalMonitor(monitorDb({
+    sources: { "cisco-psirt-csaf": { last_success: "2026-08-26T11:30:00.000Z", result: "partial", bound_hits_24h: 3, pending: true, pending_progress_at: "2026-08-26T11:00:00.000Z", pending_created_at: "2026-08-26T09:00:00.000Z", pending_stalled_attempts: 0 } },
+  }), new Date("2026-08-26T12:00:00.000Z"), async () => 200);
+  const cisco = result.sources.find((source) => source.sourceId === "cisco-psirt-csaf");
+  assert.equal(cisco.pending, true);
+  assert.equal(cisco.lastSuccess, "2026-08-26T11:30:00.000Z");
+  assert.ok(!result.alerts.some((alert) => alert.sourceId === "cisco-psirt-csaf" && ["source_repeated_bound_hits", "source_pending_stalled", "source_pending_backlog_stale"].includes(alert.code)));
+});
+
+test("Cisco pending work alerts on a repeated continuation or an old backlog", async () => {
+  const stalled = await captureOperationalMonitor(monitorDb({
+    sources: { "cisco-psirt-csaf": { last_success: "2026-08-26T11:30:00.000Z", result: "partial", bound_hits_24h: 3, pending: true, pending_progress_at: "2026-08-24T12:00:00.000Z", pending_created_at: "2026-08-26T09:00:00.000Z", pending_stalled_attempts: 2 } },
+  }), new Date("2026-08-26T12:00:00.000Z"), async () => 200);
+  assert.ok(stalled.alerts.some((alert) => alert.code === "source_pending_stalled"));
+  assert.ok(stalled.alerts.some((alert) => alert.code === "source_repeated_bound_hits"));
+
+  const oldBacklog = await captureOperationalMonitor(monitorDb({
+    sources: { "cisco-psirt-csaf": { last_success: "2026-08-26T11:30:00.000Z", result: "partial", bound_hits_24h: 1, pending: true, pending_progress_at: "2026-08-26T11:30:00.000Z", pending_created_at: "2026-08-24T12:00:00.000Z", pending_stalled_attempts: 0 } },
+  }), new Date("2026-08-26T12:00:00.000Z"), async () => 200);
+  assert.ok(oldBacklog.alerts.some((alert) => alert.code === "source_pending_backlog_stale"));
+});
+
+test("Cisco failed requests remain failures even when a resumable checkpoint exists", async () => {
+  const result = await captureOperationalMonitor(monitorDb({
+    sources: { "cisco-psirt-csaf": { last_success: "2026-08-26T11:30:00.000Z", result: "failed", failed: 1, pending: false, last_failure: "2026-08-26T11:55:00.000Z" } },
+  }), new Date("2026-08-26T12:00:00.000Z"), async () => 200);
+  assert.ok(result.alerts.some((alert) => alert.code === "source_latest_attempt_failed" && alert.sourceId === "cisco-psirt-csaf"));
 });
 
 test("operational thresholds and daily monitoring workflow are explicit", () => {

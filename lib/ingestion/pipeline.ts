@@ -18,12 +18,17 @@ export interface RunVendorOptions {
   maxItems?: number;
 }
 
-export function ingestionBatchOutcome(results: readonly unknown[]): { status: "success" | "partial"; httpStatus: 200 | 207 } {
-  const incomplete = results.some((result) => {
-    const status = (result as { status?: unknown } | null)?.status;
-    return status === "failed" || status === "partial";
-  });
-  return incomplete ? { status: "partial", httpStatus: 207 } : { status: "success", httpStatus: 200 };
+export function ingestionBatchOutcome(results: readonly unknown[]): { status: "success" | "pending" | "partial"; httpStatus: 200 | 202 | 207 } {
+  const batches = results as readonly { status?: string; counts?: { failed?: number }; checkpoint?: { status?: string } }[];
+  // A saved continuation is normal unfinished work. Failures take precedence so
+  // a pending checkpoint never conceals a failed upstream request.
+  if (batches.some((result) => result?.status === "failed" || (result?.counts?.failed ?? 0) > 0 || result?.checkpoint?.status === "failed" || (result?.status === "partial" && !["pending", "running"].includes(result?.checkpoint?.status ?? "")))) {
+    return { status: "partial", httpStatus: 207 };
+  }
+  if (batches.some((result) => result?.status === "pending" || result?.status === "skipped" || ["pending", "running"].includes(result?.checkpoint?.status ?? ""))) {
+    return { status: "pending", httpStatus: 202 };
+  }
+  return { status: "success", httpStatus: 200 };
 }
 
 export async function runVendorAdapter(adapter: VendorAdapter, repository: IngestionRepository, options: RunVendorOptions = {}): Promise<IngestResult> {

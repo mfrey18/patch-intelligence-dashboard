@@ -1,12 +1,16 @@
 import type { Database } from "../../db/database";
 import type { IngestionMode, IngestResult } from "./contracts";
-import { defaultDeltaStart, INGESTION_MODES, rollingWindowStart, windowDaysForSource } from "./operational-policy";
+import { defaultDeltaStart, DELTA_LOOKBACK_DAYS, INGESTION_MODES, rollingWindowStart, windowDaysForSource } from "./operational-policy";
+
+const CISCO_SOURCE_ID = "cisco-psirt-csaf";
+const CISCO_SCHEDULED_ID = /^(?:daily:cisco:|daily:cisco-psirt-csaf:)/;
 
 export interface IngestionRequest {
   mode?: IngestionMode;
   since?: string;
   until?: string;
   checkpointId?: string;
+  scheduled?: boolean;
 }
 
 export interface IngestionCheckpoint {
@@ -23,6 +27,7 @@ export interface IngestionCheckpoint {
 
 export function normalizeIngestionRequest(sourceId: string, request: IngestionRequest, now = new Date()): Omit<IngestionCheckpoint, "status" | "continuation"> {
   const mode = request.mode ?? "delta";
+  validateScheduledScope(sourceId, request, mode);
   if (!INGESTION_MODES.includes(mode)) throw new Error("Unsupported ingestion mode");
   if (mode === "replay" && (!request.since || !request.until)) throw new Error("Replay mode requires explicit since and until timestamps");
 
@@ -46,15 +51,34 @@ export function normalizeIngestionRequest(sourceId: string, request: IngestionRe
 }
 
 export async function loadOrCreateCheckpoint(db: Database, sourceId: string, request: IngestionRequest, now = new Date()): Promise<IngestionCheckpoint> {
+  validateScheduledScope(sourceId, request, request.mode ?? "delta");
+  const scheduledCisco = isScheduledCiscoRequest(sourceId, request);
+  if (scheduledCisco) {
+    const oldest = await findOldestIncompleteCiscoCheckpoint(db);
+    if (oldest) return checkpointFromRow(oldest);
+  }
   if (request.checkpointId) {
     const existing = await db.prepare("SELECT id, source_id, mode, coverage_start, coverage_end, window_start, window_end, continuation_token, status FROM ingestion_checkpoints WHERE id=?").bind(request.checkpointId).first<Record<string, unknown>>();
     if (existing) {
       if (String(existing.source_id) !== sourceId || (request.mode && String(existing.mode) !== request.mode)) throw new Error("Checkpoint identity conflicts with the requested source or mode");
-      if ((request.since && new Date(request.since).toISOString() !== String(existing.coverage_start)) || (request.until && new Date(request.until).toISOString() !== String(existing.coverage_end))) throw new Error("Checkpoint identity conflicts with the requested coverage range");
-      return checkpointFromRow(existing);
+      if (!scheduledCisco && ((request.since && new Date(request.since).toISOString() !== String(existing.coverage_start)) || (request.until && new Date(request.until).toISOString() !== String(existing.coverage_end)))) throw new Error("Checkpoint identity conflicts with the requested coverage range");
+      if (!(scheduledCisco && String(existing.status) === "complete")) return checkpointFromRow(existing);
     }
   }
-  const planned = normalizeIngestionRequest(sourceId, request, now);
+  let planned = normalizeIngestionRequest(sourceId, request, now);
+  if (scheduledCisco) {
+    const boundary = await findLastCompletedCiscoCoverageEnd(db);
+    const start = boundary
+      ? new Date(Math.max(rollingWindowStart(now).getTime(), new Date(boundary).getTime() - DELTA_LOOKBACK_DAYS * 86_400_000))
+      : new Date(planned.coverageStart);
+    const end = new Date(now);
+    if (start <= end) {
+      const baseId = request.checkpointId ?? "daily:cisco:today";
+      const generatedId = `${baseId}:${compactTimestamp(start)}-${compactTimestamp(end)}`;
+      planned = normalizeIngestionRequest(sourceId, { ...request, since: start.toISOString(), until: end.toISOString(), checkpointId: generatedId }, now);
+      if (end.getTime() - start.getTime() <= DELTA_LOOKBACK_DAYS * 86_400_000) planned = { ...planned, windowEnd: end.toISOString() };
+    }
+  }
   const timestamp = now.toISOString();
   await db.prepare("INSERT INTO ingestion_checkpoints (id, source_id, mode, coverage_start, coverage_end, window_start, window_end, continuation_token, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 'pending', ?, ?) ON CONFLICT DO NOTHING").bind(planned.id, sourceId, planned.mode, planned.coverageStart, planned.coverageEnd, planned.windowStart, planned.windowEnd, timestamp, timestamp).run();
   let row = await db.prepare("SELECT id, source_id, mode, coverage_start, coverage_end, window_start, window_end, continuation_token, status FROM ingestion_checkpoints WHERE id=?").bind(planned.id).first<Record<string, unknown>>();
@@ -135,4 +159,36 @@ function parseTimestamp(value: string | undefined, fallback: Date, label: string
 
 function checkpointFromRow(row: Record<string, unknown>): IngestionCheckpoint {
   return { id: String(row.id), sourceId: String(row.source_id), mode: String(row.mode) as IngestionMode, coverageStart: String(row.coverage_start), coverageEnd: String(row.coverage_end), windowStart: String(row.window_start), windowEnd: String(row.window_end), continuation: row.continuation_token == null ? null : String(row.continuation_token), status: String(row.status) as IngestionCheckpoint["status"] };
+}
+
+export function isCiscoScheduledCheckpointId(value: string | undefined): boolean {
+  return Boolean(value && CISCO_SCHEDULED_ID.test(value));
+}
+
+export function isScheduledCiscoRequest(sourceId: string, request: IngestionRequest): boolean {
+  const mode = request.mode ?? "delta";
+  return sourceId === CISCO_SOURCE_ID && mode === "delta" && (request.scheduled === true || (request.scheduled == null && isCiscoScheduledCheckpointId(request.checkpointId)));
+}
+
+export function validateScheduledScope(sourceId: string, request: IngestionRequest, mode = request.mode ?? "delta"): void {
+  if (request.scheduled != null && typeof request.scheduled !== "boolean") throw new Error("scheduled must be a boolean");
+  if (request.scheduled === true && (sourceId !== CISCO_SOURCE_ID || mode !== "delta")) throw new Error("scheduled ingestion is only supported for Cisco delta checkpoints");
+  if (request.scheduled === true && request.checkpointId && !isCiscoScheduledCheckpointId(request.checkpointId)) throw new Error("scheduled Cisco checkpoints must use the daily checkpoint namespace");
+  if (request.scheduled === false && sourceId === CISCO_SOURCE_ID && isCiscoScheduledCheckpointId(request.checkpointId)) throw new Error("daily Cisco checkpoints require scheduled=true");
+}
+
+async function findOldestIncompleteCiscoCheckpoint(db: Database): Promise<Record<string, unknown> | null> {
+  const result = await db.prepare("SELECT id, source_id, mode, coverage_start, coverage_end, window_start, window_end, continuation_token, status FROM ingestion_checkpoints WHERE source_id=? AND mode='delta' AND status<>'complete' AND (id LIKE 'daily:cisco:%' OR id LIKE 'daily:cisco-psirt-csaf:%') ORDER BY created_at ASC, updated_at ASC, id ASC LIMIT 1").bind(CISCO_SOURCE_ID).all<Record<string, unknown>>();
+  const rows = result.results ?? [];
+  return rows[0] ?? null;
+}
+
+async function findLastCompletedCiscoCoverageEnd(db: Database): Promise<string | null> {
+  const result = await db.prepare("SELECT id, coverage_end FROM ingestion_checkpoints WHERE source_id=? AND mode='delta' AND status='complete' AND (id LIKE 'daily:cisco:%' OR id LIKE 'daily:cisco-psirt-csaf:%') ORDER BY coverage_end DESC, completed_at DESC, id DESC LIMIT 1").bind(CISCO_SOURCE_ID).all<Record<string, unknown>>();
+  const row = result.results?.[0];
+  return row?.coverage_end == null ? null : String(row.coverage_end);
+}
+
+function compactTimestamp(value: Date): string {
+  return value.toISOString().replace(/[^0-9]/g, "");
 }

@@ -280,3 +280,13 @@ test('native workflows use short-lived GitHub identity tokens for Tailscale', as
     assert.doesNotMatch(workflow, /oauth-secret:/);
   }
 });
+
+test('Cisco scheduled completion is a job-level gate separate from resumable daily work', async () => {
+  const ingestion = await readFile(new URL('../.github/workflows/ingestion.yml', import.meta.url), 'utf8');
+  const matrix = ingestion.split('\n  cisco:')[0];
+  assert.doesNotMatch(matrix, /source: cisco-psirt-csaf/);
+  assert.match(ingestion, /cisco:\s[\s\S]*outputs:\s[\s\S]*daily_complete:\s+\$\{\{ steps\.cisco-run\.outputs\.daily_complete \}\}/);
+  assert.match(ingestion, /housekeeping:\s[\s\S]*needs:\s+\[daily, cisco\]/);
+  assert.match(ingestion, /daily-cycle-complete:\s[\s\S]*needs:\s+\[daily, cisco, housekeeping\]/);
+  assert.match(ingestion, /needs\.cisco\.outputs\.daily_complete == 'true'/);
+});

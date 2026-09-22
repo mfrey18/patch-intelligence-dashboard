@@ -6,7 +6,7 @@ import { queryCveDetail } from "../lib/api/cve-query";
 import { PostgresIngestionRepository, seedIngestionCatalog } from "../lib/ingestion/postgres-repository";
 import { ingestionBatchOutcome, runVendorAdapter } from "../lib/ingestion/pipeline";
 import { createVendorAdapter, SOURCE_IDS, type AdapterEnvironment } from "../lib/ingestion/source-registry";
-import { advanceCheckpoint, checkpointBatchKey, loadOrCreateCheckpoint, markCheckpointFailed, markCheckpointRunning, type IngestionCheckpoint, type IngestionRequest } from "../lib/ingestion/orchestration";
+import { advanceCheckpoint, checkpointBatchKey, isScheduledCiscoRequest, loadOrCreateCheckpoint, markCheckpointFailed, markCheckpointRunning, validateScheduledScope, type IngestionCheckpoint, type IngestionRequest } from "../lib/ingestion/orchestration";
 import { clampBatchSize } from "../lib/ingestion/operational-policy";
 import { ingestCveEnrichment } from "../lib/ingestion/enrichments/cve";
 import { ingestVulnCheck } from "../lib/ingestion/enrichments/vulncheck";
@@ -93,50 +93,61 @@ async function handleIngestion(request: Request, env: Env): Promise<Response> {
   } catch { return privateJson({ error: "Invalid JSON body" }, 400); }
   const requested = [...new Set(body.sources ?? [])];
   if (body.refreshProjection != null && typeof body.refreshProjection !== "boolean") return privateJson({ error: "refreshProjection must be a boolean" }, 400);
+  if (body.scheduled != null && typeof body.scheduled !== "boolean") return privateJson({ error: "scheduled must be a boolean" }, 400);
   if (requested.length !== 1) return privateJson({ error: "Exactly one source is required per ingestion invocation" }, 400);
   const [sourceId] = requested;
   if (!SOURCE_IDS.has(sourceId)) return privateJson({ error: "Request includes a source outside the ingestion allowlist" }, 400);
+  try { validateScheduledScope(sourceId, body, body.mode ?? "delta"); }
+  catch (error) { return privateJson({ error: safeError(error) }, 400); }
   if ((body.since && !validTimestamp(body.since)) || (body.until && !validTimestamp(body.until))) return privateJson({ error: "since and until must be valid ISO-8601 timestamps" }, 400);
   if (body.since && body.until && new Date(body.since) > new Date(body.until)) return privateJson({ error: "since must not be later than until" }, 400);
   try { await seedIngestionCatalog(env.DB); } catch (error) { return privateJson({ error: "Ingestion schema is unavailable", detail: safeError(error) }, 503); }
 
-  const readiness=await env.DB.prepare("SELECT readiness,retry_after FROM sources WHERE id=?").bind(sourceId).first<{readiness:string;retry_after:string|null}>();
-  if(readiness?.retry_after && Date.parse(readiness.retry_after)>Date.now())return privateJson({status:"partial",results:[{sourceId,status:"skipped",reason:"Source cooldown",retryAfter:readiness.retry_after}]});
-  if(readiness?.readiness==="paused") return privateJson({status:"success",results:[{sourceId,status:"skipped",reason:"Source is paused"}]});
   const results: unknown[] = [];
   const holder = crypto.randomUUID();
-  if (!(await acquireLease(env.DB, sourceId, holder))) return privateJson({ completedAt: new Date().toISOString(), status: "partial", results: [{ sourceId, status: "skipped", error: "Source ingestion is already running" }] }, 207);
+  const scheduledCisco = isScheduledCiscoRequest(sourceId, body);
+  if (!(await acquireLease(env.DB, sourceId, holder))) return privateJson({ completedAt: new Date().toISOString(), status: scheduledCisco ? "pending" : "partial", results: [{ sourceId, status: scheduledCisco ? "pending" : "skipped", ...(scheduledCisco ? { reason: "Source ingestion is already running" } : { error: "Source ingestion is already running" }) }] }, scheduledCisco ? 202 : 207);
   let checkpoint: IngestionCheckpoint | null = null;
   let shouldRefreshProjection = false;
   try {
-    const adapter = createVendorAdapter(sourceId, env);
-    if (adapter) {
-      checkpoint = await loadOrCreateCheckpoint(env.DB, sourceId, body);
-      if (checkpoint.status === "complete") return privateJson({ completedAt: new Date().toISOString(), status: "success", results: [{ sourceId, status: "unchanged", checkpoint }] });
-      await markCheckpointRunning(env.DB, checkpoint.id);
-      const key = body.idempotencyKey ?? checkpointBatchKey(checkpoint, body.checkpointId);
-      const result = await runVendorAdapter(adapter, new PostgresIngestionRepository(env.DB), {
-        since: checkpoint.windowStart, until: checkpoint.windowEnd, idempotencyKey: key,
-        mode: checkpoint.mode, continuation: checkpoint.continuation ?? undefined,
-        checkpointId: checkpoint.id, discoveryGeneration: body.checkpointId, maxItems: clampBatchSize(body.maxItems),
-      });
-      const nextCheckpoint = await advanceCheckpoint(env.DB, checkpoint, result);
-      results.push({ ...result, checkpoint: nextCheckpoint });
-      shouldRefreshProjection = body.refreshProjection !== false && (checkpoint.mode === "delta" || nextCheckpoint.status === "complete");
+    const readiness=await env.DB.prepare("SELECT readiness,retry_after FROM sources WHERE id=?").bind(sourceId).first<{readiness:string;retry_after:string|null}>();
+    if(readiness?.retry_after && Date.parse(readiness.retry_after)>Date.now()) {
+      results.push({ sourceId, status: scheduledCisco ? "pending" : "skipped", reason: "Source cooldown", retryAfter: readiness.retry_after });
+    } else if(readiness?.readiness==="paused") {
+      results.push({ sourceId, status: scheduledCisco ? "pending" : "skipped", reason: "Source is paused" });
     } else {
-      if (body.mode && body.mode !== "delta") throw new Error(`${sourceId} is a full-snapshot enrichment and only supports delta synchronization`);
-      const key = body.idempotencyKey ?? `${sourceId}:delta:${new Date().toISOString().slice(0, 10)}`;
-      if (sourceId === "cisa-kev") results.push(await ingestCisaKev(env.DB, key));
-      else if (sourceId === "first-epss") results.push(await ingestEpssBulk(env.DB, key));
-      else if (sourceId === "vulncheck-kev") results.push(await ingestVulnCheck(env.DB, env.VULNCHECK_API_TOKEN, key));
-      else if (sourceId === "cve-list-v5" || sourceId === "nvd-cve") results.push(await ingestCveEnrichment(env.DB, sourceId, env.NVD_API_KEY, body.idempotencyKey));
-      else throw new Error("Source has no usable adapter");
-      shouldRefreshProjection = body.refreshProjection !== false;
+      const adapter = createVendorAdapter(sourceId, env);
+      if (adapter) {
+        checkpoint = await loadOrCreateCheckpoint(env.DB, sourceId, body);
+        if (checkpoint.status === "complete") return privateJson({ completedAt: new Date().toISOString(), status: "success", results: [{ sourceId, status: "unchanged", checkpoint }] });
+        await markCheckpointRunning(env.DB, checkpoint.id);
+        const key = body.idempotencyKey ?? checkpointBatchKey(checkpoint, scheduledCisco ? undefined : body.checkpointId);
+        const result = await runVendorAdapter(adapter, new PostgresIngestionRepository(env.DB), {
+          since: checkpoint.windowStart, until: checkpoint.windowEnd, idempotencyKey: key,
+          mode: checkpoint.mode, continuation: checkpoint.continuation ?? undefined,
+          checkpointId: checkpoint.id, discoveryGeneration: scheduledCisco ? checkpoint.id : body.checkpointId, maxItems: scheduledCisco ? 1 : clampBatchSize(body.maxItems),
+        });
+        const nextCheckpoint = await advanceCheckpoint(env.DB, checkpoint, result);
+        const status = scheduledCisco && nextCheckpoint.status === "pending" && result.counts.failed === 0 && result.status !== "failed" ? "pending" : result.counts.failed > 0 || result.status === "failed" ? "failed" : result.status;
+        const retry = result.counts.failed > 0 ? await env.DB.prepare("SELECT retry_after FROM sources WHERE id=?").bind(sourceId).first<{ retry_after: string | null }>() : null;
+        results.push({ ...result, status, ...(retry?.retry_after ? { retryAfter: retry.retry_after } : {}), checkpoint: nextCheckpoint });
+        shouldRefreshProjection = body.refreshProjection !== false && (checkpoint.mode === "delta" || nextCheckpoint.status === "complete");
+      } else {
+        if (body.mode && body.mode !== "delta") throw new Error(`${sourceId} is a full-snapshot enrichment and only supports delta synchronization`);
+        const key = body.idempotencyKey ?? `${sourceId}:delta:${new Date().toISOString().slice(0, 10)}`;
+        if (sourceId === "cisa-kev") results.push(await ingestCisaKev(env.DB, key));
+        else if (sourceId === "first-epss") results.push(await ingestEpssBulk(env.DB, key));
+        else if (sourceId === "vulncheck-kev") results.push(await ingestVulnCheck(env.DB, env.VULNCHECK_API_TOKEN, key));
+        else if (sourceId === "cve-list-v5" || sourceId === "nvd-cve") results.push(await ingestCveEnrichment(env.DB, sourceId, env.NVD_API_KEY, body.idempotencyKey));
+        else throw new Error("Source has no usable adapter");
+        shouldRefreshProjection = body.refreshProjection !== false;
+      }
     }
   } catch (error) {
     const message = safeError(error);
     if (checkpoint) await markCheckpointFailed(env.DB, checkpoint.id, message);
-    results.push({ sourceId, status: "failed", error: message });
+    const retry = await env.DB.prepare("SELECT retry_after FROM sources WHERE id=?").bind(sourceId).first<{ retry_after: string | null }>();
+    results.push({ sourceId, status: "failed", error: message, ...(retry?.retry_after ? { retryAfter: retry.retry_after } : {}) });
   } finally {
     await releaseLease(env.DB, sourceId, holder);
   }
