@@ -9,6 +9,7 @@ const SUG_ROOT = "https://api.msrc.microsoft.com/sug/v2.0/en-US";
 const DIRECTORIES = ["advisories", "vex"] as const;
 
 export const microsoftAdapter: VendorAdapter = {
+  historicalCoverage: "complete_index",
   vendor: "microsoft",
   sourceId: "microsoft-msrc-csaf",
   async discover(ctx) {

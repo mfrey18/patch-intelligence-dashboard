@@ -12,6 +12,7 @@ const MONTH_NAMES = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "se
 const FIRST_CSPU_YEAR = 2026;
 
 export const oracleAdapter: VendorAdapter = {
+  historicalCoverage: "complete_index",
   vendor: "oracle",
   sourceId: "oracle-cpu-csaf",
   policy: { maxResponseBytes: 64_000_000, timeoutMs: 60_000 },

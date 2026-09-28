@@ -1,3 +1,4 @@
+import { recordSourceCompletion } from "../source-completion";
 import { scopePredicate } from "../../api/intelligence-sql";
 import type { Database, Statement } from "../../../db/database";
 import type { IngestResult } from "../contracts";
@@ -98,6 +99,7 @@ export async function ingestEpssBulk(db: Database, idempotencyKey?: string, opti
         counts.unchanged = trackedObservations.length;
         await db.prepare("UPDATE source_runs SET dataset_date=?, source_hash=? WHERE id=?").bind(scoreDate, sourceHash, runId).run();
         await repository.finishRun(runId, { status: "unchanged", ...runFields, counts, errors: [] });
+        await recordSourceCompletion(db, { sourceId: "first-epss", ownerKind: "snapshot", ownerId: runId, kind: "delta", coverageStart: startedAt, coverageEnd: startedAt, completedAt: new Date().toISOString(), memberCount: trackedObservations.length, sourceRunId: runId });
         return { sourceId: "first-epss", runId, status: "unchanged", ...runFields, counts, errors: [], startedAt, completedAt: new Date().toISOString() };
       }
     }
@@ -113,9 +115,12 @@ export async function ingestEpssBulk(db: Database, idempotencyKey?: string, opti
     await flush();
     await db.batch([db.prepare("UPDATE epss_datasets SET is_current=FALSE WHERE is_current=TRUE"), db.prepare("UPDATE epss_datasets SET is_current=TRUE, status='published' WHERE score_date=?").bind(scoreDate)]);
     counts.discovered = parsed.rowCount; counts.inserted = matched;
+    // Publishing an empty current membership removes previously visible scores.
+    counts.changed = matched === 0 ? Number(latest?.matched_cve_count ?? 0) : 0;
     await db.prepare("UPDATE source_runs SET dataset_date=?, source_hash=? WHERE id=?").bind(scoreDate, sourceHash, runId).run();
     const status = "success";
     await repository.finishRun(runId, { status, ...runFields, counts, errors: [] });
+    await recordSourceCompletion(db, { sourceId: "first-epss", ownerKind: "snapshot", ownerId: runId, kind: "delta", coverageStart: startedAt, coverageEnd: startedAt, completedAt: new Date().toISOString(), memberCount: matched, sourceRunId: runId });
     return { sourceId: "first-epss", runId, status, ...runFields, counts, errors: [], startedAt, completedAt: new Date().toISOString() };
     });
   } catch (error) {

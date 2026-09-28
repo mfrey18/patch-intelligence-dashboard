@@ -1,44 +1,56 @@
-// Existing sources retain their daily jobs. Expansion/enrichment uses the same DB readiness catalog.
-const base=process.env.API_ORIGIN;
-if(!base||!process.env.INGEST_SECRET)throw new Error('API_ORIGIN and INGEST_SECRET are required');
-const headers={authorization:`Bearer ${process.env.INGEST_SECRET}`,'content-type':'application/json'};
-async function call(path,body){
- const response=await fetch(`${base}${path}`,{headers,method:body?'POST':'GET',body:body?JSON.stringify(body):undefined,signal:AbortSignal.timeout(140000)});
- if(!response.ok)throw new Error(`Internal API returned ${response.status}`);
- return response.json();
+import { appendFile } from 'node:fs/promises';
+import { pathToFileURL } from 'node:url';
+import { runDailyIngestion, writeGithubResult } from './daily-ingestion.mjs';
+
+export const EXISTING_DAILY_SOURCES = new Set(['microsoft-msrc-csaf','cisco-psirt-csaf','palo-alto-psirt-csaf','mozilla-mfsa-yaml','cisa-kev','first-epss']);
+export function selectExpansionSources(sources, requested) {
+  const selected=sources.filter(s=>requested ? s.id===requested : s.enabled && s.readiness==='production' && !EXISTING_DAILY_SOURCES.has(s.id));
+  if(requested && !selected.length)throw new Error('Unknown source');
+  return selected.map(s=>s.id);
 }
-const {sources}=await call('/api/internal/sources');
-const previous=new Set(['microsoft-msrc-csaf','cisco-psirt-csaf','palo-alto-psirt-csaf','mozilla-mfsa-yaml','cisa-kev','first-epss']);
-const requested=process.env.SOURCE_ID;
-if(process.env.CHECKPOINT_ID&&!requested)throw new Error('CHECKPOINT_ID requires an explicit SOURCE_ID');
-const attempts=Number(process.env.MAX_ATTEMPTS??30);
-const batchSize=Number(process.env.BATCH_SIZE??1);
-if(!Number.isSafeInteger(attempts)||attempts<1||attempts>50)throw new Error('MAX_ATTEMPTS must be 1–50');
-if(!Number.isSafeInteger(batchSize)||batchSize<1||batchSize>12)throw new Error('BATCH_SIZE must be 1–12');
-const selected=sources.filter(s=>requested?s.id===requested:s.enabled&&s.readiness==='production'&&!previous.has(s.id));
-if(requested&&!selected.length)throw new Error('Unknown source');
-selected.sort((a,b)=>(a.kind==='cve_enrichment'?1:0)-(b.kind==='cve_enrichment'?1:0));
-let failed=false,changed=false;
-for(const source of selected){
- try {
-  for(let attempt=0;attempt<attempts;attempt++){
-   const mode=process.env.INGEST_MODE??'delta';
-   const checkpointId=process.env.CHECKPOINT_ID??`expansion:${source.id}:${mode}:${new Date().toISOString().slice(0,10)}`;
-   const response=await call('/api/internal/ingest',{sources:[source.id],mode,checkpointId,maxItems:batchSize,refreshProjection:false});
-   const result=response.results?.[0];
-   changed ||= Boolean(result?.counts?.inserted||result?.counts?.changed);
-   if(!result||result.status==='failed'||result.counts?.failed)throw new Error(`Source batch failed (${source.id})`);
-   console.log(JSON.stringify({source:source.id,status:result.status,counts:result.counts,checkpoint:result.checkpoint?.status,boundHit:result.boundHit}));
-   if(result.status==='skipped')break;
-   if(result.checkpoint ? result.checkpoint.status==='complete' : !result.boundHit)break;
+async function internalCall(env,path,body) {
+  if(!env.API_ORIGIN || !env.INGEST_SECRET)throw new Error('API_ORIGIN and INGEST_SECRET are required');
+  const response=await fetch(new URL(path,env.API_ORIGIN),{headers:{authorization:`Bearer ${env.INGEST_SECRET}`,'content-type':'application/json'},method:body?'POST':'GET',body:body?JSON.stringify(body):undefined,signal:AbortSignal.timeout(140000)});
+  if(!response.ok)throw new Error(`Internal API returned ${response.status}`);
+  return response.json();
+}
+export async function refreshExpansionProjection(env, call=internalCall) {
+  const errors=[];
+  try {
+    const epss=await call(env,'/api/internal/ingest',{sources:['first-epss'],mode:'delta',idempotencyKey:`expansion-epss:${Date.now()}`,refreshProjection:false});
+    const run=epss.results?.[0];
+    if(!['success','unchanged'].includes(run?.status) || run?.counts?.failed || run?.boundHit)throw new Error('EPSS membership refresh did not complete');
+  } catch(error) { errors.push(error); }
+  try {
+    const projection=await call(env,'/api/internal/projection',{});
+    if(projection.status!=='success')throw new Error('Dashboard projection refresh failed');
+  } catch(error) { errors.push(error); }
+  if(errors.length)throw new AggregateError(errors,errors.map(error=>error.message).join(' | '));
+}
+export async function main(env=process.env) {
+  if(env.REFRESH_PROJECTION==='true') {
+    await refreshExpansionProjection(env);
+    return;
   }
- }catch(error){failed=true;console.error(error.message);}
+
+  const {sources}=await internalCall(env,'/api/internal/sources');
+  const selected=selectExpansionSources(sources,env.SOURCE_ID);
+  if(env.LIST_SOURCES==='true') {
+    const matrix=JSON.stringify({source:selected});
+    if(env.GITHUB_OUTPUT)await appendFile(env.GITHUB_OUTPUT,`matrix=${matrix}\nhas_sources=${selected.length>0}\n`);
+    console.log(matrix);return;
+  }
+  // Scheduled Actions jobs pass exactly one ID; source isolation is enforced there.
+  // Local explicit invocations retain bounded sequential compatibility.
+  let failed=false;
+  for(const sourceId of selected){
+    const summary=await runDailyIngestion({env,sourceId,maxBatches:Number(env.MAX_ATTEMPTS??env.SOURCE_MAX_BATCHES??50),log:event=>console.log(JSON.stringify(event))});
+    await writeGithubResult(summary);
+    if(summary.alert)console.log(`::warning title=Ingestion attention::${sourceId}: ${summary.error??summary.reason}`);
+    failed ||= summary.status==='failed';
+  }
+  if(failed)process.exitCode=1;
 }
-if(changed){
- // Re-run membership-sensitive EPSS publication after admitting new CVEs.
- const epss=await call('/api/internal/ingest',{sources:['first-epss'],mode:'delta',idempotencyKey:`expansion-epss:${Date.now()}`,refreshProjection:false});
- if(epss.results?.[0]?.counts?.failed||epss.results?.[0]?.status==='failed'){failed=true;console.error('EPSS membership refresh failed');}
- const projection=await call('/api/internal/projection',{});
- if(projection.status!=='success')throw new Error('Dashboard projection refresh failed');
+if(process.argv[1] && import.meta.url===pathToFileURL(process.argv[1]).href) {
+  try{await main();}catch(error){console.error(error instanceof Error?error.message:String(error));process.exitCode=1;}
 }
-if(failed)process.exitCode=1;

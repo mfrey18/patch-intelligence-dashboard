@@ -5,6 +5,7 @@ import { fetchWithPolicy, readJsonLimited, sanitizeText, sourceCooldown } from '
 import { record, list, validCve, iso } from '../adapters/utils';
 import { PostgresIngestionRepository } from '../postgres-repository';
 import { sha256 } from '../hash';
+import { recordSourceCompletion } from '../source-completion';
 
 export const VULNCHECK_URL='https://api.vulncheck.com/v3/backup/vulncheck-kev';
 export const VULNCHECK_PUBLIC_URL='https://www.vulncheck.com/kev';
@@ -52,6 +53,7 @@ export async function publishVulnCheckSnapshot(db:Database,runId:string,entries:
     const present = new Set(entries.map(entry => entry.cveId));
     counts.changed += previous.results.filter(row => row.active && !present.has(row.cve_id)).length;
     await tx.prepare('UPDATE vulncheck_entries SET active=FALSE,removed_at=?,last_observed_at=?,source_run_id=? WHERE active=TRUE AND NOT(cve_id=ANY(?::text[]))').bind(now,now,runId,entries.map(e=>e.cveId)).run();
+    await recordSourceCompletion(tx,{sourceId:'vulncheck-kev',ownerKind:'snapshot',ownerId:runId,kind:'delta',coverageStart:now,coverageEnd:now,completedAt:now,memberCount:entries.length,sourceRunId:runId});
     // Absence from a catalog is not evidence that historical exploitation never happened.
     return counts;
   });

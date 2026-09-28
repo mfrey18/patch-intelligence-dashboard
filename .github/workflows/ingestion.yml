@@ -31,9 +31,9 @@ on:
         required: false
         type: string
       max_attempts:
-        description: Bounded Worker invocations in this run (1-50)
+        description: Bounded source batches in this run (1-50, at most 10 minutes)
         required: false
-        default: "10"
+        default: "50"
         type: string
 
 permissions:
@@ -70,27 +70,25 @@ jobs:
           oauth-client-id: ${{ vars.TS_OIDC_CLIENT_ID }}
           audience: ${{ vars.TS_AUDIENCE }}
           tags: tag:patch-ci
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
       - name: Run isolated source delta
         env:
           API_ORIGIN: ${{ vars.DATABASE_BACKEND == 'postgres' && vars.PRIVATE_API_BASE_URL || vars.PUBLIC_API_BASE_URL }}
           INGEST_SECRET: ${{ secrets[vars.DATABASE_BACKEND == 'postgres' && 'NATIVE_INGEST_SECRET' || 'INGEST_SECRET'] }}
           SOURCE_ID: ${{ matrix.source }}
-          MAX_ATTEMPTS: ${{ matrix.max_attempts }}
-          BATCH_SIZE: ${{ matrix.batch_size }}
-        run: |
-          test -n "$API_ORIGIN" && test -n "$INGEST_SECRET"
-          checkpoint="daily:${SOURCE_ID}:$(date -u +%Y-%m-%d)"
-          for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
-            response="$(jq -n --arg source "$SOURCE_ID" --arg checkpoint "$checkpoint" --argjson batchSize "$BATCH_SIZE" '{sources:[$source],mode:"delta",checkpointId:$checkpoint,maxItems:$batchSize,refreshProjection:false}' |
-              curl --fail-with-body --silent --show-error -X POST -H "Authorization: Bearer $INGEST_SECRET" -H "content-type: application/json" --data-binary @- "$API_ORIGIN/api/internal/ingest")"
-            echo "$response" | jq .
-            result_status="$(echo "$response" | jq -r '.results[0].status')"
-            if [ "$result_status" = "failed" ] || [ "$result_status" = "skipped" ]; then exit 1; fi
-            state="$(echo "$response" | jq -r '.results[0].checkpoint.status // "complete"')"
-            if [ "$state" = "complete" ]; then exit 0; fi
-          done
-          echo "Source repeatedly reached the configured batch bound" >&2
-          exit 1
+          SOURCE_MAX_BATCHES: ${{ matrix.max_attempts }}
+          SOURCE_MAX_DURATION_MS: '600000'
+          SOURCE_REPORT_PATH: daily-${{ matrix.source }}.json
+        run: node scripts/daily-ingestion.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: daily-${{ matrix.source }}
+          path: daily-${{ matrix.source }}.json
+          if-no-files-found: error
 
   cisco:
     if: github.event_name == 'schedule' && github.event.schedule == '17 7 * * *' && vars.ENABLE_SCHEDULED_INGESTION == 'true'
@@ -176,41 +174,28 @@ jobs:
           oauth-client-id: ${{ vars.TS_OIDC_CLIENT_ID }}
           audience: ${{ vars.TS_AUDIENCE }}
           tags: tag:patch-ci
-      - name: Run one bounded source batch
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Run bounded validation or explicit replay
         env:
           API_ORIGIN: ${{ vars.DATABASE_BACKEND == 'postgres' && vars.PRIVATE_API_BASE_URL || vars.PUBLIC_API_BASE_URL }}
           INGEST_SECRET: ${{ secrets[vars.DATABASE_BACKEND == 'postgres' && 'NATIVE_INGEST_SECRET' || 'INGEST_SECRET'] }}
           SOURCE_ID: ${{ inputs.source }}
-          MODE: ${{ inputs.mode }}
+          INGEST_MODE: ${{ inputs.mode }}
           SINCE: ${{ inputs.since }}
           UNTIL: ${{ inputs.until }}
           CHECKPOINT_ID: ${{ inputs.checkpoint_id }}
           MAX_ATTEMPTS: ${{ inputs.max_attempts }}
-        run: |
-          test -n "$API_ORIGIN" && test -n "$INGEST_SECRET"
-          case "$MAX_ATTEMPTS" in ''|*[!0-9]*) echo "max_attempts must be an integer" >&2; exit 1;; esac
-          test "$MAX_ATTEMPTS" -ge 1 && test "$MAX_ATTEMPTS" -le 50
-          checkpoint="$CHECKPOINT_ID"
-          if [ -z "$checkpoint" ] && [ "$MODE" = "backfill" ]; then checkpoint="backfill:${SOURCE_ID}:six-month"; fi
-          if [ "$SOURCE_ID" = "cisco-psirt-csaf" ] || [ "$SOURCE_ID" = "oracle-cpu-csaf" ]; then batch_size=1; else batch_size=12; fi
-          for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
-            response="$(jq -n --arg source "$SOURCE_ID" --arg mode "$MODE" --arg since "$SINCE" --arg until "$UNTIL" --arg checkpoint "$checkpoint" --argjson batchSize "$batch_size" '
-              {sources:[$source],mode:$mode,maxItems:$batchSize}
-              + (if $since == "" then {} else {since:$since} end)
-              + (if $until == "" then {} else {until:$until} end)
-              + (if $checkpoint == "" then {} else {checkpointId:$checkpoint} end)
-            ' | curl --fail-with-body --silent --show-error -X POST -H "Authorization: Bearer $INGEST_SECRET" -H "content-type: application/json" --data-binary @- "$API_ORIGIN/api/internal/ingest")"
-            echo "$response" | jq .
-            result_status="$(echo "$response" | jq -r '.results[0].status')"
-            if [ "$result_status" = "failed" ] || [ "$result_status" = "skipped" ]; then exit 1; fi
-            state="$(echo "$response" | jq -r '.results[0].checkpoint.status // "complete"')"
-            if [ "$state" = "complete" ]; then exit 0; fi
-          done
-          echo "Checkpoint remains resumable after $MAX_ATTEMPTS bounded Worker invocations."
+          SOURCE_MAX_DURATION_MS: '600000'
+        run: node scripts/sync-expansion.mjs
 
   housekeeping:
     if: always() && github.event_name == 'schedule' && github.event.schedule == '17 7 * * *' && vars.ENABLE_SCHEDULED_INGESTION == 'true'
     needs: [daily, cisco]
+    outputs:
+      daily_complete: ${{ steps.daily-reports.outputs.daily_complete }}
     environment: production-ingestion
     runs-on: ubuntu-latest
     steps:
@@ -220,6 +205,19 @@ jobs:
           oauth-client-id: ${{ vars.TS_OIDC_CLIENT_ID }}
           audience: ${{ vars.TS_AUDIENCE }}
           tags: tag:patch-ci
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: daily-*
+          path: daily-reports
+          merge-multiple: true
+      - name: Check every daily source completion report
+        id: daily-reports
+        run: node scripts/aggregate-daily.mjs daily-reports
       - name: Publish one atomic dashboard projection
         env:
           API_ORIGIN: ${{ vars.DATABASE_BACKEND == 'postgres' && vars.PRIVATE_API_BASE_URL || vars.PUBLIC_API_BASE_URL }}
@@ -243,20 +241,50 @@ jobs:
           echo "$monitor" | jq -e '.status != "unhealthy" and .projection.parityStatus == "passed" and .projection.actualCount > 0 and (.sources | length) >= 6'
 
   daily-cycle-complete:
-    if: github.event_name == 'schedule' && github.event.schedule == '17 7 * * *' && vars.ENABLE_SCHEDULED_INGESTION == 'true' && needs.daily.result == 'success' && needs.cisco.result == 'success' && needs.housekeeping.result == 'success' && needs.cisco.outputs.daily_complete == 'true'
+    if: github.event_name == 'schedule' && github.event.schedule == '17 7 * * *' && vars.ENABLE_SCHEDULED_INGESTION == 'true' && needs.daily.result == 'success' && needs.cisco.result == 'success' && needs.housekeeping.result == 'success' && needs.cisco.outputs.daily_complete == 'true' && needs.housekeeping.outputs.daily_complete == 'true'
     needs: [daily, cisco, housekeeping]
     runs-on: ubuntu-latest
     name: Daily cycle complete
     steps:
       - run: echo "All scheduled sources and a fresh Cisco coverage window completed."
 
-  expansion:
+  expansion-sources:
     if: github.event_name == 'schedule' && github.event.schedule == '27 * * * *' && vars.ENABLE_SCHEDULED_INGESTION == 'true' && vars.DATABASE_BACKEND == 'postgres'
     environment: production-ingestion
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    outputs:
+      matrix: ${{ steps.catalog.outputs.matrix }}
+      has_sources: ${{ steps.catalog.outputs.has_sources }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ vars.TS_OIDC_CLIENT_ID }}
+          audience: ${{ vars.TS_AUDIENCE }}
+          tags: tag:patch-ci
+      - name: Select enabled production expansion sources
+        id: catalog
+        env:
+          API_ORIGIN: ${{ vars.PRIVATE_API_BASE_URL }}
+          INGEST_SECRET: ${{ secrets.NATIVE_INGEST_SECRET }}
+          LIST_SOURCES: 'true'
+        run: node scripts/sync-expansion.mjs
+
+  expansion:
+    needs: expansion-sources
+    if: needs.expansion-sources.outputs.has_sources == 'true'
+    environment: production-ingestion
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix: ${{ fromJSON(needs.expansion-sources.outputs.matrix) }}
     concurrency:
-      group: expansion-ingestion
+      group: expansion-ingestion-${{ matrix.source }}
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
@@ -268,8 +296,33 @@ jobs:
           oauth-client-id: ${{ vars.TS_OIDC_CLIENT_ID }}
           audience: ${{ vars.TS_AUDIENCE }}
           tags: tag:patch-ci
-      - name: Resume enabled expansion sources and enrichment queues
+      - name: Resume one bounded source cycle
         env:
           API_ORIGIN: ${{ vars.PRIVATE_API_BASE_URL }}
           INGEST_SECRET: ${{ secrets.NATIVE_INGEST_SECRET }}
+          SOURCE_ID: ${{ matrix.source }}
+          SOURCE_MAX_BATCHES: '50'
+          SOURCE_MAX_DURATION_MS: '600000'
+        run: node scripts/sync-expansion.mjs
+
+  expansion-projection:
+    needs: [expansion-sources, expansion]
+    if: always() && needs.expansion-sources.outputs.has_sources == 'true'
+    environment: production-ingestion
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ vars.TS_OIDC_CLIENT_ID }}
+          audience: ${{ vars.TS_AUDIENCE }}
+          tags: tag:patch-ci
+      - name: Publish partial committed progress with current EPSS membership
+        env:
+          API_ORIGIN: ${{ vars.PRIVATE_API_BASE_URL }}
+          INGEST_SECRET: ${{ secrets.NATIVE_INGEST_SECRET }}
+          REFRESH_PROJECTION: 'true'
         run: node scripts/sync-expansion.mjs

@@ -1,3 +1,4 @@
+import { checkSourceBudget } from "./source-execution";
 import type { ChangeType, NormalizedAdvisory } from "../domain/types";
 import { diffAdvisory } from "./diff";
 import { hashAdvisory } from "./hash";
@@ -64,11 +65,14 @@ export async function runVendorAdapter(adapter: VendorAdapter, repository: Inges
       boundHit = true;
     }
     for (const ref of refs) {
+      checkSourceBudget();
       const itemStart = Date.now();
       try {
+        checkSourceBudget();
         const raw = await adapter.fetch(ref, { fetch, policy });
         const advisories = await adapter.normalize(raw, { observedAt: new Date().toISOString(), sanitizeText });
         for (const advisory of advisories) {
+          checkSourceBudget();
           validateNormalizedAdvisory(advisory, adapter);
           const hashes = await hashAdvisory(advisory);
           const previous = await repository.latestRevision(adapter.vendor, advisory.vendorAdvisoryId);
@@ -78,6 +82,7 @@ export async function runVendorAdapter(adapter: VendorAdapter, repository: Inges
           counts[result] += 1;
         }
       } catch (error) {
+        checkSourceBudget();
         counts.failed += 1;
         const message = safeError(error);
         errors.push(`${ref.id}: ${message}`);
@@ -87,6 +92,7 @@ export async function runVendorAdapter(adapter: VendorAdapter, repository: Inges
       }
     }
   } catch (error) {
+    checkSourceBudget();
     counts.failed += 1;
     errors.push(`discovery: ${safeError(error)}`);
     const retryAt=sourceCooldown(error); if(retryAt)await repository.deferSource?.(adapter.sourceId,retryAt);

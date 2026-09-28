@@ -4,6 +4,7 @@ import { normalizeCsaf } from './csaf';
 
 const ROOT = 'https://security.access.redhat.com/data/csaf/v2/advisories/';
 export const redHatAdapter: VendorAdapter = {
+  historicalCoverage: "complete_index",
   vendor: 'red-hat', sourceId: 'red-hat-csaf',
   policy: {maxResponseBytes: 32_000_000},
   async discover(ctx) {

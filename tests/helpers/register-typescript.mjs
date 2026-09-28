@@ -4,7 +4,7 @@ import ts from "typescript";
 
 registerHooks({
   resolve(specifier, context, nextResolve) {
-    if (/^\.{1,2}\//.test(specifier) && !/\.[^/]+$/.test(specifier)) {
+    if (!context.parentURL?.includes("/node_modules/") && /^\.{1,2}\//.test(specifier) && !/\.[^/]+$/.test(specifier)) {
       return nextResolve(`${specifier}.ts`, context);
     }
 

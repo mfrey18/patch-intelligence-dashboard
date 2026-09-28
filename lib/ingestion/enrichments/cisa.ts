@@ -1,3 +1,4 @@
+import { recordSourceCompletion } from "../source-completion";
 import type { Database, Statement } from "../../../db/database";
 import type { IngestResult } from "../contracts";
 import { PostgresIngestionRepository } from "../postgres-repository";
@@ -69,7 +70,7 @@ export async function ingestCisaKev(db: Database, idempotencyKey?: string): Prom
       const entryHash = await sha256(entry);
       const previous = existing.get(entry.cveId);
       const changeTypes = !previous ? ["KEV_ADDED"] : previous.due_date !== entry.dueDate ? ["KEV_DEADLINE_CHANGED", ...(previous.entry_hash !== entryHash ? ["KEV_ENTRY_MODIFIED"] : [])] : previous.entry_hash !== entryHash ? ["KEV_ENTRY_MODIFIED"] : [];
-      if (!previous) counts.inserted += 1; else if (changeTypes.length) counts.changed += 1; else counts.unchanged += 1;
+      if (!previous) counts.inserted += 1; else if (changeTypes.length || !previous.active || !previous.evidence_present) counts.changed += 1; else counts.unchanged += 1;
       if (!previous || changeTypes.length > 0 || !previous.active || !previous.evidence_present) {
         statements.push(db.prepare("INSERT INTO cves (id, created_at, updated_at) VALUES (?, ?, ?) ON CONFLICT DO NOTHING").bind(entry.cveId, now, now));
         statements.push(db.prepare("INSERT INTO kev_entries (cve_id, source_run_id, active, date_added, due_date, required_action, known_ransomware_campaign_use, entry_hash, source_url, first_observed_at, last_observed_at, removed_at) VALUES (?, ?, TRUE, ?, ?, ?, ?, ?, ?, ?, ?, NULL) ON CONFLICT(cve_id) DO UPDATE SET source_run_id=excluded.source_run_id, active=TRUE, date_added=excluded.date_added, due_date=excluded.due_date, required_action=excluded.required_action, known_ransomware_campaign_use=excluded.known_ransomware_campaign_use, entry_hash=excluded.entry_hash, source_url=excluded.source_url, last_observed_at=excluded.last_observed_at, removed_at=NULL").bind(entry.cveId, runId, entry.dateAdded, entry.dueDate, sanitizeText(entry.requiredAction) ?? entry.requiredAction, entry.knownRansomwareCampaignUse ?? null, entryHash, snapshot.sourceUrl, now, now));
@@ -87,6 +88,8 @@ export async function ingestCisaKev(db: Database, idempotencyKey?: string): Prom
     await db.prepare("UPDATE source_runs SET dataset_date=?, source_hash=? WHERE id=?").bind(snapshot.dateReleased, snapshotHash, runId).run();
     const status = counts.inserted + counts.changed > 0 ? "success" : "unchanged";
     await repository.finishRun(runId, { status, ...runFields, counts, errors: [] });
+    const completedAt = new Date().toISOString();
+    await recordSourceCompletion(db, { sourceId: "cisa-kev", ownerKind: "snapshot", ownerId: runId, kind: "delta", coverageStart: startedAt, coverageEnd: startedAt, completedAt, memberCount: snapshot.count, sourceRunId: runId });
     return { sourceId: "cisa-kev", runId, status, ...runFields, counts, errors: [], startedAt, completedAt: new Date().toISOString() };
     });
   } catch (error) {

@@ -1,9 +1,10 @@
 // Run the scheduled Cisco delta until it reaches a fresh checkpoint or the
 // workflow's bounded processing budget. The API owns checkpoint selection and
 // Cisco's native adapter owns upstream pacing and Retry-After handling.
-import { appendFile } from 'node:fs/promises';
+import { appendFile, writeFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 
+export const LEGACY_BATCH_SOURCES = new Set(['microsoft-msrc-csaf', 'palo-alto-psirt-csaf', 'mozilla-mfsa-yaml']);
 export const CISCO_SOURCE = 'cisco-psirt-csaf';
 export const DEFAULT_MAX_BATCHES = 50;
 export const DEFAULT_MAX_DURATION_MS = 10 * 60 * 1000;
@@ -70,7 +71,7 @@ function isConcurrentSkip(run) {
 function retryDeadline({ response, payload, run, now }) {
   const header = response?.headers?.get?.('retry-after');
   const headerDeadline = retryAfterDeadline(header, now);
-  const field = valueFrom(run?.retryAfter, run?.retry_after, run?.cooldownUntil, run?.cooldown_until, payload?.retryAfter, payload?.retry_after);
+  const field = valueFrom(run?.retryAfter, run?.retry_after, run?.cooldownUntil, run?.cooldown_until, run?.progress?.retryAt, payload?.retryAfter, payload?.retry_after);
   const fieldDeadline = typeof field === 'number'
     ? (field > now ? field : now + field * 1000)
     : retryAfterDeadline(field, now);
@@ -93,7 +94,7 @@ function writeOutputLine(name, value) {
 
 export function renderDailySummary(summary) {
   const lines = [
-    `### Cisco daily ingestion: **${summary.status}**`,
+    `### ${summary.source ?? CISCO_SOURCE} ingestion: **${summary.status}**`,
     '',
     `- Date window: \`${summary.dailyDate}\``,
     `- Batches: ${summary.batches}/${summary.maxBatches}`,
@@ -119,16 +120,21 @@ export async function runDailyIngestion({
   sleep = sleepDefault,
   now = Date.now,
   log = () => {},
-  maxBatches = Number(env.CISCO_MAX_BATCHES ?? DEFAULT_MAX_BATCHES),
-  maxDurationMs = Number(env.CISCO_MAX_DURATION_MS ?? DEFAULT_MAX_DURATION_MS),
+  maxBatches = Number(env.SOURCE_MAX_BATCHES ?? env.CISCO_MAX_BATCHES ?? DEFAULT_MAX_BATCHES),
+  maxDurationMs = Number(env.SOURCE_MAX_DURATION_MS ?? env.CISCO_MAX_DURATION_MS ?? DEFAULT_MAX_DURATION_MS),
   maxBacklogAgeMs = Number(env.CISCO_MAX_BACKLOG_AGE_MS ?? DEFAULT_MAX_BACKLOG_AGE_MS),
-  sourceId = CISCO_SOURCE,
+  sourceId = env.SOURCE_ID ?? CISCO_SOURCE,
+  mode = env.INGEST_MODE ?? 'delta',
+  checkpointOverride = env.CHECKPOINT_ID || undefined,
+  since = env.SINCE, until = env.UNTIL,
+  scheduled = env.SCHEDULED !== 'false' && mode === 'delta' && !since && !until && (!checkpointOverride || checkpointOverride.startsWith(`daily:${sourceId}:`) || checkpointOverride.startsWith(`expansion:${sourceId}:delta:`) || (sourceId === CISCO_SOURCE && checkpointOverride.startsWith('daily:cisco:'))),
+  maxItems = LEGACY_BATCH_SOURCES.has(sourceId) ? 12 : 1,
   origin = env.API_ORIGIN ?? env.PRIVATE_API_BASE_URL ?? env.PUBLIC_API_BASE_URL ?? 'http://127.0.0.1:3002',
   secret = env.INGEST_SECRET,
 } = {}) {
   if (!secret) throw new Error('INGEST_SECRET is required');
-  if (!Number.isSafeInteger(maxBatches) || maxBatches < 1) throw new Error('maxBatches must be a positive integer');
-  if (!Number.isFinite(maxDurationMs) || maxDurationMs <= 0) throw new Error('maxDurationMs must be positive');
+  if (!Number.isSafeInteger(maxBatches) || maxBatches < 1 || maxBatches > 50) throw new Error('maxBatches must be an integer from 1 to 50');
+  if (!Number.isFinite(maxDurationMs) || maxDurationMs <= 0 || maxDurationMs > DEFAULT_MAX_DURATION_MS) throw new Error('maxDurationMs must be positive and at most 600000');
   if (!Number.isFinite(maxBacklogAgeMs) || maxBacklogAgeMs < 0) throw new Error('maxBacklogAgeMs must be non-negative');
 
   const originUrl = new URL(origin);
@@ -136,7 +142,7 @@ export async function runDailyIngestion({
   const startedAtMs = now();
   const startedAt = new Date(startedAtMs).toISOString();
   const dailyDate = startedAt.slice(0, 10); // Pin this before any request crosses UTC midnight.
-  const checkpointId = `daily:${sourceId}:${dailyDate}`;
+  const checkpointId = checkpointOverride ?? (scheduled ? `daily:${sourceId}:${dailyDate}` : `${mode}:${sourceId}:${startedAt}`);
   const deadline = startedAtMs + maxDurationMs;
   let previousPosition;
   let batches = 0;
@@ -156,6 +162,7 @@ export async function runDailyIngestion({
   });
   const finish = (status, fields = {}) => {
     const summary = { ...baseSummary(), ...fields, status, elapsedMs: Math.max(0, now() - startedAtMs) };
+    if(sourceId !== CISCO_SOURCE)for(const key of ['reason','error'])if(summary[key])summary[key]=summary[key].replaceAll('Cisco',sourceId);
     summary.alert = Boolean(summary.alert || summary.hadRequestFailure || status === 'failed' || summary.backlogTooOld);
     emit({ event: 'summary', ...summary });
     return summary;
@@ -168,7 +175,7 @@ export async function runDailyIngestion({
     if (current >= deadline) return finish('pending', { reason: 'Processing time budget exhausted; checkpoint remains resumable.' });
     if (batches >= maxBatches) return finish('pending', { reason: 'Batch budget exhausted; checkpoint remains resumable.' });
 
-    const body = { sources: [sourceId], mode: 'delta', scheduled: true, checkpointId, maxItems: 1, refreshProjection: false };
+    const body = { sources: [sourceId], mode, scheduled, checkpointId, invocationStartedAt: startedAt, budgetMs: Math.max(1, deadline-now()), maxItems, refreshProjection: false, ...(since ? {since} : {}), ...(until ? {until} : {}) };
     let response;
     let payload;
     try {
@@ -196,7 +203,8 @@ export async function runDailyIngestion({
     }
 
     const run = firstResult(payload);
-    const checkpoint = normalizeCheckpoint(run?.checkpoint ?? payload?.checkpoint);
+    const progress = run?.progress;
+    const checkpoint = normalizeCheckpoint(run?.checkpoint ?? payload?.checkpoint ?? (progress?.ownerId ? {id:progress.ownerId,status:progress.state,continuation:progress.position,coverageEnd:progress.coverageEnd} : null));
     latestCheckpoint = checkpoint ?? latestCheckpoint;
     const retryAt = retryDeadline({ response, payload, run, now: now() });
     const failed = responseFailure(response, payload, run);
@@ -205,6 +213,7 @@ export async function runDailyIngestion({
 
     emit({ event: 'batch', batch: batches, status: run?.status ?? payload?.status, httpStatus: response.status, checkpoint, retryAt: retryAt ? new Date(retryAt).toISOString() : null });
 
+    if (/paused/i.test(run?.reason ?? '')) return finish('pending', { reason: 'Source is paused; no cycle was completed.' });
     if (concurrent) return finish('pending', { reason: 'Cisco ingestion is already running; this run will be resumed by the next window.', concurrent: true });
 
     if (failed) {
@@ -237,11 +246,11 @@ export async function runDailyIngestion({
     if (!run) return finish('failed', { error: 'Cisco response did not include a result.' });
     const status = run.status ?? payload.status;
     if (!['success', 'unchanged', 'partial', 'pending'].includes(status)) return finish('failed', { error: `Unexpected Cisco ingestion status: ${status ?? 'missing'}` });
-    const checkpointStatus = checkpoint?.status ?? (run.boundHit || run.continuation ? 'pending' : 'complete');
+    const checkpointStatus = checkpoint?.status ?? progress?.state ?? (['success', 'unchanged'].includes(status) && !run.boundHit && !run.continuation ? 'complete' : 'pending');
     const coverageEndMs = toDateMs(checkpoint?.coverageEnd);
     if (coverageEndMs != null && startedAtMs - coverageEndMs > maxBacklogAgeMs) backlogTooOld = true;
 
-    const freshComplete = checkpointStatus === 'complete' && coverageEndMs != null && coverageEndMs >= startedAtMs;
+    const freshComplete = checkpointStatus === 'complete' && (!scheduled || (coverageEndMs != null && coverageEndMs >= startedAtMs));
     if (freshComplete) {
       if (now() > deadline) return finish('pending', { reason: 'The fresh checkpoint completed after the processing budget; verify it on the next run.' });
       return finish('complete', { reason: 'Cisco coverage reached the invocation start time.' });
@@ -258,7 +267,7 @@ export async function runDailyIngestion({
   }
 }
 
-export async function writeGithubResult(summary, { outputPath = process.env.GITHUB_OUTPUT, summaryPath = process.env.GITHUB_STEP_SUMMARY, append = appendFile } = {}) {
+export async function writeGithubResult(summary, { outputPath = process.env.GITHUB_OUTPUT, summaryPath = process.env.GITHUB_STEP_SUMMARY, reportPath = process.env.SOURCE_REPORT_PATH, append = appendFile } = {}) {
   const output = [
     writeOutputLine('daily_status', summary.status),
     writeOutputLine('daily_complete', summary.status === 'complete' ? 'true' : 'false'),
@@ -267,6 +276,7 @@ export async function writeGithubResult(summary, { outputPath = process.env.GITH
     writeOutputLine('daily_batches', summary.batches),
     writeOutputLine('daily_checkpoint', summary.checkpointId),
   ].join('');
+  if (reportPath) await writeFile(reportPath, JSON.stringify(summary));
   if (outputPath) await append(outputPath, output);
   if (summaryPath) await append(summaryPath, renderDailySummary(summary));
   return summary;

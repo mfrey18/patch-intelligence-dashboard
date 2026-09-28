@@ -1,3 +1,4 @@
+import { checkSourceBudget, sourceOperationSignal, sourceSleep } from "./source-execution";
 import type { SourcePolicy } from "./contracts";
 
 export function sanitizeText(value: unknown): string | undefined {
@@ -29,20 +30,23 @@ export function retryAfterDeadline(value: string | null, now: number): number | 
 
 export async function fetchWithPolicy(url: string, policy: SourcePolicy, init?: RequestInit, allowedStatuses: number[] = [], runtime: FetchPolicyRuntime = {}): Promise<Response> {
   const now = runtime.now ?? Date.now;
-  const sleep = runtime.sleep ?? ((milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
+  const sleep = runtime.sleep ?? sourceSleep;
   const retryable = (status: number) => status === 429 || status >= 500;
   for (let attempt = 0; attempt <= policy.retries; attempt += 1) {
+    checkSourceBudget();
     let response: Response;
     try {
       const request = async () => {
         // Scheduling wait is separate from the network request timeout.
+        checkSourceBudget();
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), policy.timeoutMs);
-        try { return await (runtime.fetch ?? fetch)(url, { ...init, redirect: init?.redirect ?? "follow", signal: controller.signal }); }
+        try { return await (runtime.fetch ?? fetch)(url, { ...init, redirect: init?.redirect ?? "follow", signal: AbortSignal.any([controller.signal, ...(init?.signal ? [init.signal] : []), ...(sourceOperationSignal() ? [sourceOperationSignal()!] : [])]) }); }
         finally { clearTimeout(timeout); }
       };
       response = await (runtime.schedule ? runtime.schedule(request) : request());
     } catch (error) {
+      checkSourceBudget();
       if (attempt >= policy.retries || (error instanceof SourceHttpError && (!retryable(error.status) || (error.retryAt ?? 0) - now() > 30_000))) throw error;
       const wait = Math.max(policy.retryBaseMs * 2 ** attempt, error instanceof SourceHttpError ? (error.retryAt ?? 0) - now() : 0);
       await sleep(wait);
@@ -69,24 +73,30 @@ export async function readJsonLimited(response: Response, maxBytes: number): Pro
 }
 
 export async function readTextLimited(response: Response, maxBytes: number): Promise<string> {
+  checkSourceBudget();
   const reader = response.body?.getReader();
   if (!reader) return "";
+  const signal = sourceOperationSignal();
+  const cancel = () => { void reader.cancel("Source budget exhausted"); };
+  signal?.addEventListener("abort", cancel, {once:true});
   const chunks: Uint8Array[] = []; let size = 0;
   let timedOut = false;
   const deadline = setTimeout(() => { timedOut = true; void reader.cancel("Source body timeout"); }, 60_000);
   try {
     while (true) {
+      checkSourceBudget();
       const {value,done} = await reader.read();
       if (done) break;
       size += value.byteLength;
       if (size > maxBytes) { await reader.cancel(); throw new Error(`Source response exceeds ${maxBytes} bytes`); }
       chunks.push(value);
     }
+    checkSourceBudget();
     if (timedOut) throw new Error("Source body timeout");
     const buffer = new Uint8Array(size); let offset = 0;
     for (const chunk of chunks) { buffer.set(chunk,offset); offset += chunk.byteLength; }
     return new TextDecoder().decode(buffer);
-  } finally { clearTimeout(deadline); reader.releaseLock(); }
+  } finally { clearTimeout(deadline); signal?.removeEventListener("abort", cancel); reader.releaseLock(); }
 }
 
 export function constantTimeEqual(left: string, right: string): boolean {

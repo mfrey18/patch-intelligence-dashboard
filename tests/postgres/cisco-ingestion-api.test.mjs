@@ -17,8 +17,8 @@ async function setup(db, offset = 4) {
   const start = new Date(yesterday.getTime() - 3 * 86_400_000).toISOString();
   const id = `daily:${sourceId}:${end.slice(0, 10)}`;
   await db.prepare(`INSERT INTO ingestion_checkpoints
-    (id,source_id,mode,coverage_start,coverage_end,window_start,window_end,continuation_token,status,created_at,updated_at)
-    VALUES (?,?,'delta',?,?,?,?,?,'pending',?,?)`).bind(id, sourceId, start, end, start, end, `offset:${offset}`, end, end).run();
+    (id,source_id,mode,coverage_start,coverage_end,window_start,window_end,continuation_token,status,created_at,updated_at,scheduled)
+    VALUES (?,?,'delta',?,?,?,?,?,'pending',?,?,true)`).bind(id, sourceId, start, end, start, end, `offset:${offset}`, end, end).run();
   const refs = Array.from({ length: 7 }, (_, index) => ({ id: `cisco-test-${index}`, url: `https://sec.cloudapps.cisco.com/test-${index}.json` }));
   const discoveryId = `${sourceId}:${id}:${start}:${end}:start`;
   await db.prepare('INSERT INTO discovery_pages(id,source_id,refs) VALUES (?,?,?::jsonb)').bind(discoveryId, sourceId, JSON.stringify(refs)).run();
@@ -188,11 +188,11 @@ test('retention preserves the latest completed Cisco coverage boundary across a 
       coverage_start=now()-INTERVAL '48 days', window_start=now()-INTERVAL '48 days',
       coverage_end=now()-INTERVAL '45 days', window_end=now()-INTERVAL '45 days',
       completed_at=now()-INTERVAL '45 days', created_at=now()-INTERVAL '45 days' WHERE id=?`).bind(checkpoint.id).run();
-    for (const id of ['daily:cisco:older', 'manual:cisco:old']) {
+    for (const [index,id] of ['daily:cisco:older', 'manual:cisco:old'].entries()) {
       await db.prepare(`INSERT INTO ingestion_checkpoints(id,source_id,mode,coverage_start,coverage_end,window_start,window_end,status,created_at,updated_at,completed_at)
         VALUES (?,?,'delta',now()-INTERVAL '49 days',now()-INTERVAL '46 days',now()-INTERVAL '49 days',now()-INTERVAL '46 days','complete',now()-INTERVAL '46 days',now()-INTERVAL '46 days',now()-INTERVAL '46 days')`).bind(id, sourceId).run();
       // The canonical range is unique; give the next fixture its own range.
-      await db.prepare("UPDATE ingestion_checkpoints SET coverage_start=coverage_start-INTERVAL '1 hour' WHERE id=?").bind(id).run();
+      await db.prepare("UPDATE ingestion_checkpoints SET coverage_start=coverage_start-(? * INTERVAL '1 hour') WHERE id=?").bind(index+1,id).run();
     }
     const result = await pruneRollingRetention(db);
     assert.equal(result.completedCheckpoints, 2);
@@ -225,4 +225,43 @@ test('manual and bootstrap-style clients retain partial and skipped batch status
     assert.equal(contended.body.results[0].status, 'skipped', JSON.stringify(contended.body));
     await releaseLease(db, sourceId, 'manual-owner');
   } finally { globalThis.fetch = originalFetch; await db.close(); }
+});
+
+test('request deadline returns pending and fences a delayed upstream response before recovery', async () => {
+  const db=await testDatabase();const originalFetch=globalThis.fetch;
+  let unblock;const delayed=new Promise(resolve=>{unblock=resolve;});
+  let entered;const began=new Promise(resolve=>{entered=resolve;});
+  try {
+    const checkpoint=await setup(db);
+    globalThis.fetch=async url=>{entered();await delayed;return documentResponse(url);};
+    const responsePromise=invoke(env(db),{budgetMs:150});
+    await began;
+    const response=await responsePromise;
+    assert.equal(response.status,202,JSON.stringify(response.body));
+    assert.equal(response.body.results[0].status,'pending');
+    assert.equal((await db.prepare('SELECT COUNT(*) count FROM advisories').first()).count,0);
+    assert.equal((await db.prepare('SELECT continuation_token FROM ingestion_checkpoints WHERE id=?').bind(checkpoint.id).first()).continuation_token,'offset:4');
+    unblock();await new Promise(resolve=>setTimeout(resolve,25));
+    assert.equal((await db.prepare('SELECT COUNT(*) count FROM advisories').first()).count,0,'late response must not publish');
+    globalThis.fetch=async url=>documentResponse(url);
+    const resumed=await invoke(env(db));
+    assert.equal(resumed.status,202,JSON.stringify(resumed.body));
+    assert.equal(resumed.body.results[0].checkpoint.continuation,'offset:5');
+    assert.equal((await db.prepare("SELECT COUNT(*) count FROM source_runs WHERE status='failed'").first()).count,0,'budget exhaustion is unfinished work, not an upstream failure');
+  }finally{unblock();globalThis.fetch=originalFetch;await db.close();}
+});
+
+test('a replacement lease recovers an interrupted run immediately without a fifteen-minute failure loop',async()=>{
+ const db=await testDatabase();const originalFetch=globalThis.fetch;
+ try{
+  const checkpoint=await setup(db);
+  const repository=new PostgresIngestionRepository(db);
+  const prior=await repository.beginRun(sourceId,checkpointBatchKey(checkpoint),{mode:'delta',windowStart:checkpoint.windowStart,windowEnd:checkpoint.windowEnd,continuationIn:checkpoint.continuation,checkpointId:checkpoint.id,maxItems:1});
+  globalThis.fetch=async url=>documentResponse(url);
+  const response=await invoke(env(db));
+  assert.equal(response.status,202,JSON.stringify(response.body));
+  assert.equal(response.body.results[0].checkpoint.continuation,'offset:5');
+  const old=await db.prepare('SELECT status,idempotency_key,records_failed FROM source_runs WHERE id=?').bind(prior.runId).first();
+  assert.equal(old.status,'partial');assert.equal(old.idempotency_key,null);assert.equal(old.records_failed,0);
+ }finally{globalThis.fetch=originalFetch;await db.close();}
 });
