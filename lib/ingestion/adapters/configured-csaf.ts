@@ -25,6 +25,7 @@ export function createConfiguredCsafAdapter(options: ConfiguredCsafOptions): Ven
   });
 
   return {
+    historicalCoverage: "configured_subset",
     vendor: options.vendor,
     sourceId: options.sourceId,
     async discover() {

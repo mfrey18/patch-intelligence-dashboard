@@ -2,6 +2,9 @@ import type { Database } from "../../db/database";
 import type { IngestionMode, IngestResult } from "./contracts";
 import { defaultDeltaStart, DELTA_LOOKBACK_DAYS, INGESTION_MODES, rollingWindowStart, windowDaysForSource } from "./operational-policy";
 
+import { recordSourceCompletion } from "./source-completion";
+import { PRODUCTION_SOURCE_IDS, SOURCE_CATALOG } from "./source-catalog";
+
 const CISCO_SOURCE_ID = "cisco-psirt-csaf";
 const CISCO_SCHEDULED_ID = /^(?:daily:cisco:|daily:cisco-psirt-csaf:)/;
 
@@ -11,6 +14,7 @@ export interface IngestionRequest {
   until?: string;
   checkpointId?: string;
   scheduled?: boolean;
+  deadline?: string;
 }
 
 export interface IngestionCheckpoint {
@@ -22,6 +26,8 @@ export interface IngestionCheckpoint {
   windowStart: string;
   windowEnd: string;
   continuation: string | null;
+  scheduled?: boolean;
+  historicalCoverageVerified?: boolean;
   status: "pending" | "running" | "failed" | "complete";
 }
 
@@ -50,41 +56,50 @@ export function normalizeIngestionRequest(sourceId: string, request: IngestionRe
   return { id: checkpointId, sourceId, mode, coverageStart: coverageStart.toISOString(), coverageEnd: coverageEnd.toISOString(), windowStart: coverageStart.toISOString(), windowEnd: windowEnd.toISOString() };
 }
 
-export async function loadOrCreateCheckpoint(db: Database, sourceId: string, request: IngestionRequest, now = new Date()): Promise<IngestionCheckpoint> {
+export async function loadOrCreateCheckpoint(db: Database, sourceId: string, request: IngestionRequest, now = new Date(), evidence: {historicalCoverage?: boolean} = {}): Promise<IngestionCheckpoint> {
   validateScheduledScope(sourceId, request, request.mode ?? "delta");
-  const scheduledCisco = isScheduledCiscoRequest(sourceId, request);
-  if (scheduledCisco) {
-    const oldest = await findOldestIncompleteCiscoCheckpoint(db);
-    if (oldest) return checkpointFromRow(oldest);
+  const scheduledSource = isScheduledSourceRequest(sourceId, request);
+  if (scheduledSource) {
+    const oldest = await findOldestIncompleteScheduledCheckpoint(db, sourceId);
+    if (oldest && Date.parse(String(oldest.coverage_end)) >= rollingWindowStart(now).getTime()) return checkpointFromRow(oldest);
+    if (oldest) {
+      await db.prepare("UPDATE ingestion_checkpoints SET retired_at=?,retired_reason='Coverage expired outside six-month window',updated_at=? WHERE source_id=? AND (scheduled=TRUE OR id LIKE 'daily:' || source_id || ':%' OR id LIKE 'expansion:' || source_id || ':delta:%' OR (source_id='cisco-psirt-csaf' AND id LIKE 'daily:cisco:%')) AND status<>'complete' AND coverage_end<? AND retired_at IS NULL").bind(now.toISOString(),now.toISOString(),sourceId,rollingWindowStart(now).toISOString()).run();
+      const remaining = await findOldestIncompleteScheduledCheckpoint(db, sourceId);
+      if (remaining) return checkpointFromRow(remaining);
+    }
   }
   if (request.checkpointId) {
-    const existing = await db.prepare("SELECT id, source_id, mode, coverage_start, coverage_end, window_start, window_end, continuation_token, status FROM ingestion_checkpoints WHERE id=?").bind(request.checkpointId).first<Record<string, unknown>>();
+    const existing = await db.prepare("SELECT id, source_id, mode, coverage_start, coverage_end, window_start, window_end, continuation_token, status, historical_coverage_verified, scheduled, retired_at FROM ingestion_checkpoints WHERE id=?").bind(request.checkpointId).first<Record<string, unknown>>();
     if (existing) {
       if (String(existing.source_id) !== sourceId || (request.mode && String(existing.mode) !== request.mode)) throw new Error("Checkpoint identity conflicts with the requested source or mode");
-      if (!scheduledCisco && ((request.since && new Date(request.since).toISOString() !== String(existing.coverage_start)) || (request.until && new Date(request.until).toISOString() !== String(existing.coverage_end)))) throw new Error("Checkpoint identity conflicts with the requested coverage range");
-      if (!(scheduledCisco && String(existing.status) === "complete")) return checkpointFromRow(existing);
+      if (!scheduledSource && ((request.since && new Date(request.since).toISOString() !== String(existing.coverage_start)) || (request.until && new Date(request.until).toISOString() !== String(existing.coverage_end)))) throw new Error("Checkpoint identity conflicts with the requested coverage range");
+      if (!(scheduledSource && (String(existing.status) === "complete" || existing.retired_at))) return checkpointFromRow(existing);
     }
   }
   let planned = normalizeIngestionRequest(sourceId, request, now);
-  if (scheduledCisco) {
-    const boundary = await findLastCompletedCiscoCoverageEnd(db);
-    const start = boundary
+  if (scheduledSource) {
+    const boundary = await findLastCompletedScheduledCoverageEnd(db, sourceId);
+    const reconcile = ["oracle-cpu-csaf", "atlassian-vulnerability-api"].includes(sourceId);
+    const expansion = !(PRODUCTION_SOURCE_IDS as readonly string[]).includes(sourceId);
+    const lastReconcile = expansion ? await db.prepare("SELECT completed_at FROM ingestion_checkpoints WHERE source_id=? AND scheduled=TRUE AND status='complete' AND coverage_start<=coverage_end-INTERVAL '5 months' ORDER BY completed_at DESC LIMIT 1").bind(sourceId).first<{completed_at:string}>() : null;
+    const reconcileDue = reconcile || (expansion && (!lastReconcile || Date.parse(lastReconcile.completed_at) < now.getTime()-7*86_400_000));
+    const start = reconcileDue ? rollingWindowStart(now) : boundary
       ? new Date(Math.max(rollingWindowStart(now).getTime(), new Date(boundary).getTime() - DELTA_LOOKBACK_DAYS * 86_400_000))
       : new Date(planned.coverageStart);
     const end = new Date(now);
     if (start <= end) {
-      const baseId = request.checkpointId ?? "daily:cisco:today";
+      const baseId = request.checkpointId ?? `daily:${sourceId}:${now.toISOString().slice(0,10)}`;
       const generatedId = `${baseId}:${compactTimestamp(start)}-${compactTimestamp(end)}`;
       planned = normalizeIngestionRequest(sourceId, { ...request, since: start.toISOString(), until: end.toISOString(), checkpointId: generatedId }, now);
-      if (end.getTime() - start.getTime() <= DELTA_LOOKBACK_DAYS * 86_400_000) planned = { ...planned, windowEnd: end.toISOString() };
+      if (reconcileDue || end.getTime() - start.getTime() <= DELTA_LOOKBACK_DAYS * 86_400_000) planned = { ...planned, windowEnd: end.toISOString() };
     }
   }
   const timestamp = now.toISOString();
-  await db.prepare("INSERT INTO ingestion_checkpoints (id, source_id, mode, coverage_start, coverage_end, window_start, window_end, continuation_token, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 'pending', ?, ?) ON CONFLICT DO NOTHING").bind(planned.id, sourceId, planned.mode, planned.coverageStart, planned.coverageEnd, planned.windowStart, planned.windowEnd, timestamp, timestamp).run();
-  let row = await db.prepare("SELECT id, source_id, mode, coverage_start, coverage_end, window_start, window_end, continuation_token, status FROM ingestion_checkpoints WHERE id=?").bind(planned.id).first<Record<string, unknown>>();
+  await db.prepare("INSERT INTO ingestion_checkpoints (id, source_id, mode, coverage_start, coverage_end, window_start, window_end, continuation_token, status, created_at, updated_at, scheduled, historical_coverage_verified) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 'pending', ?, ?, ?, ?) ON CONFLICT DO NOTHING").bind(planned.id, sourceId, planned.mode, planned.coverageStart, planned.coverageEnd, planned.windowStart, planned.windowEnd, timestamp, timestamp, scheduledSource, evidence.historicalCoverage===true).run();
+  let row = await db.prepare("SELECT id, source_id, mode, coverage_start, coverage_end, window_start, window_end, continuation_token, status, historical_coverage_verified, scheduled, retired_at FROM ingestion_checkpoints WHERE id=?").bind(planned.id).first<Record<string, unknown>>();
   let matchedCanonicalRange = false;
   if (!row) {
-    row = await db.prepare("SELECT id, source_id, mode, coverage_start, coverage_end, window_start, window_end, continuation_token, status FROM ingestion_checkpoints WHERE source_id=? AND mode=? AND coverage_start=? AND coverage_end=? LIMIT 1").bind(sourceId, planned.mode, planned.coverageStart, planned.coverageEnd).first<Record<string, unknown>>();
+    row = await db.prepare("SELECT id, source_id, mode, coverage_start, coverage_end, window_start, window_end, continuation_token, status, historical_coverage_verified, scheduled FROM ingestion_checkpoints WHERE source_id=? AND mode=? AND coverage_start=? AND coverage_end=? LIMIT 1").bind(sourceId, planned.mode, planned.coverageStart, planned.coverageEnd).first<Record<string, unknown>>();
     matchedCanonicalRange = Boolean(row);
   }
   if (!row) throw new Error("Ingestion checkpoint could not be created");
@@ -108,8 +123,10 @@ export async function markCheckpointFailed(db: Database, checkpointId: string, e
   await db.prepare("UPDATE ingestion_checkpoints SET status='failed', last_error=?, updated_at=? WHERE id=? AND status<>'complete'").bind(error.slice(0, 2000), new Date().toISOString(), checkpointId).run();
 }
 
-export async function advanceCheckpoint(db: Database, checkpoint: IngestionCheckpoint, result: IngestResult): Promise<IngestionCheckpoint> {
+export async function advanceCheckpoint(db: Database, checkpoint: IngestionCheckpoint, result: IngestResult, evidence: {historicalCoverage?: boolean} = {}): Promise<IngestionCheckpoint> {
   const now = new Date().toISOString();
+  const historicalCoverageVerified=checkpoint.historicalCoverageVerified===true && evidence.historicalCoverage===true;
+  if(checkpoint.mode==='backfill' && checkpoint.historicalCoverageVerified!==undefined) await db.prepare('UPDATE ingestion_checkpoints SET historical_coverage_verified=historical_coverage_verified AND ? WHERE id=?').bind(evidence.historicalCoverage===true,checkpoint.id).run();
   if (result.counts.failed > 0 || result.status === "failed") {
     await db.prepare("UPDATE ingestion_checkpoints SET status='failed', last_run_id=?, last_error=?, updated_at=? WHERE id=?").bind(result.runId, result.errors.join(" | ").slice(0, 2000) || "Source batch failed", now, checkpoint.id).run();
     return { ...checkpoint, status: "failed" };
@@ -122,7 +139,14 @@ export async function advanceCheckpoint(db: Database, checkpoint: IngestionCheck
   const nextStart = new Date(new Date(checkpoint.windowEnd).getTime() + 1);
   const coverageEnd = new Date(checkpoint.coverageEnd);
   if (nextStart > coverageEnd) {
-    await db.prepare("UPDATE ingestion_checkpoints SET continuation_token=NULL, status='complete', last_run_id=?, last_error=NULL, completed_at=?, updated_at=? WHERE id=?").bind(result.runId, now, now, checkpoint.id).run();
+    const complete = async (tx: Database) => {
+      await tx.prepare("UPDATE ingestion_checkpoints SET continuation_token=NULL, status='complete', last_run_id=?, last_error=NULL, completed_at=?, updated_at=? WHERE id=?").bind(result.runId, now, now, checkpoint.id).run();
+      if (checkpoint.scheduled || (checkpoint.mode==='backfill' && historicalCoverageVerified)) {
+        const members = await tx.prepare("SELECT COUNT(DISTINCT rr.source_ref) count FROM source_run_results rr JOIN source_runs r ON r.id=rr.source_run_id WHERE r.checkpoint_id=? AND rr.status IN ('inserted','changed','unchanged')").bind(checkpoint.id).first<{count:number}>();
+        await recordSourceCompletion(tx,{sourceId:checkpoint.sourceId,ownerKind:'checkpoint',ownerId:checkpoint.id,kind:checkpoint.mode==='backfill'?'backfill':'delta',coverageStart:checkpoint.coverageStart,coverageEnd:checkpoint.coverageEnd,completedAt:now,memberCount:Number(members?.count??0),sourceRunId:result.runId});
+      }
+    };
+    if (checkpoint.scheduled || checkpoint.mode==='backfill') await db.transaction(complete); else await complete(db);
     return { ...checkpoint, continuation: null, status: "complete" };
   }
   const nextEnd = boundedWindowEnd(nextStart, coverageEnd, windowDaysForSource(checkpoint.sourceId, checkpoint.mode));
@@ -158,37 +182,38 @@ function parseTimestamp(value: string | undefined, fallback: Date, label: string
 }
 
 function checkpointFromRow(row: Record<string, unknown>): IngestionCheckpoint {
-  return { id: String(row.id), sourceId: String(row.source_id), mode: String(row.mode) as IngestionMode, coverageStart: String(row.coverage_start), coverageEnd: String(row.coverage_end), windowStart: String(row.window_start), windowEnd: String(row.window_end), continuation: row.continuation_token == null ? null : String(row.continuation_token), status: String(row.status) as IngestionCheckpoint["status"] };
+  return { id: String(row.id), sourceId: String(row.source_id), mode: String(row.mode) as IngestionMode, coverageStart: String(row.coverage_start), coverageEnd: String(row.coverage_end), windowStart: String(row.window_start), windowEnd: String(row.window_end), continuation: row.continuation_token == null ? null : String(row.continuation_token), historicalCoverageVerified: Boolean(row.historical_coverage_verified), scheduled: Boolean(row.scheduled) || isScheduledCheckpointId(String(row.source_id), String(row.id)), status: String(row.status) as IngestionCheckpoint["status"] };
 }
 
 export function isCiscoScheduledCheckpointId(value: string | undefined): boolean {
   return Boolean(value && CISCO_SCHEDULED_ID.test(value));
 }
 
-export function isScheduledCiscoRequest(sourceId: string, request: IngestionRequest): boolean {
-  const mode = request.mode ?? "delta";
-  return sourceId === CISCO_SOURCE_ID && mode === "delta" && (request.scheduled === true || (request.scheduled == null && isCiscoScheduledCheckpointId(request.checkpointId)));
+export function isScheduledCheckpointId(sourceId: string, value: string | undefined): boolean {
+  return Boolean(value && (value.startsWith(`daily:${sourceId}:`) || value.startsWith(`expansion:${sourceId}:delta:`) || (sourceId===CISCO_SOURCE_ID && isCiscoScheduledCheckpointId(value))));
 }
 
+export function isScheduledSourceRequest(sourceId: string, request: IngestionRequest): boolean {
+  return (request.mode ?? "delta") === "delta" && (request.scheduled===true || (request.scheduled==null && isScheduledCheckpointId(sourceId,request.checkpointId)));
+}
+/** Compatibility export for existing Cisco callers. */
+export function isScheduledCiscoRequest(sourceId: string, request: IngestionRequest): boolean {
+  return sourceId===CISCO_SOURCE_ID && isScheduledSourceRequest(sourceId,request);
+}
 export function validateScheduledScope(sourceId: string, request: IngestionRequest, mode = request.mode ?? "delta"): void {
   if (request.scheduled != null && typeof request.scheduled !== "boolean") throw new Error("scheduled must be a boolean");
-  if (request.scheduled === true && (sourceId !== CISCO_SOURCE_ID || mode !== "delta")) throw new Error("scheduled ingestion is only supported for Cisco delta checkpoints");
-  if (request.scheduled === true && request.checkpointId && !isCiscoScheduledCheckpointId(request.checkpointId)) throw new Error("scheduled Cisco checkpoints must use the daily checkpoint namespace");
-  if (request.scheduled === false && sourceId === CISCO_SOURCE_ID && isCiscoScheduledCheckpointId(request.checkpointId)) throw new Error("daily Cisco checkpoints require scheduled=true");
+  if (request.scheduled===true && mode!=="delta") throw new Error("scheduled ingestion is only supported for delta checkpoints");
+  if (request.scheduled===true && !SOURCE_CATALOG.some(source=>source.id===sourceId)) throw new Error("Unknown scheduled source");
+  if (request.scheduled===true && request.checkpointId && !isScheduledCheckpointId(sourceId,request.checkpointId)) throw new Error("scheduled checkpoints must use the source daily checkpoint namespace");
+  if (request.scheduled===false && isScheduledCheckpointId(sourceId,request.checkpointId)) throw new Error("daily checkpoints require scheduled=true");
 }
-
-async function findOldestIncompleteCiscoCheckpoint(db: Database): Promise<Record<string, unknown> | null> {
-  const result = await db.prepare("SELECT id, source_id, mode, coverage_start, coverage_end, window_start, window_end, continuation_token, status FROM ingestion_checkpoints WHERE source_id=? AND mode='delta' AND status<>'complete' AND (id LIKE 'daily:cisco:%' OR id LIKE 'daily:cisco-psirt-csaf:%') ORDER BY created_at ASC, updated_at ASC, id ASC LIMIT 1").bind(CISCO_SOURCE_ID).all<Record<string, unknown>>();
-  const rows = result.results ?? [];
-  return rows[0] ?? null;
+const scheduledPredicate = "(scheduled=TRUE OR id LIKE 'daily:' || source_id || ':%' OR id LIKE 'expansion:' || source_id || ':delta:%' OR (source_id='cisco-psirt-csaf' AND id LIKE 'daily:cisco:%'))";
+async function findOldestIncompleteScheduledCheckpoint(db: Database, sourceId: string): Promise<Record<string, unknown> | null> {
+  const result = await db.prepare(`SELECT id, source_id, mode, coverage_start, coverage_end, window_start, window_end, continuation_token, status, historical_coverage_verified, scheduled FROM ingestion_checkpoints WHERE source_id=? AND mode='delta' AND status<>'complete' AND retired_at IS NULL AND ${scheduledPredicate} ORDER BY created_at ASC, updated_at ASC, id ASC LIMIT 1`).bind(sourceId).all<Record<string, unknown>>();
+  return result.results?.[0] ?? null;
 }
-
-async function findLastCompletedCiscoCoverageEnd(db: Database): Promise<string | null> {
-  const result = await db.prepare("SELECT id, coverage_end FROM ingestion_checkpoints WHERE source_id=? AND mode='delta' AND status='complete' AND (id LIKE 'daily:cisco:%' OR id LIKE 'daily:cisco-psirt-csaf:%') ORDER BY coverage_end DESC, completed_at DESC, id DESC LIMIT 1").bind(CISCO_SOURCE_ID).all<Record<string, unknown>>();
-  const row = result.results?.[0];
-  return row?.coverage_end == null ? null : String(row.coverage_end);
+async function findLastCompletedScheduledCoverageEnd(db: Database, sourceId: string): Promise<string | null> {
+  const result = await db.prepare(`SELECT id, coverage_end FROM ingestion_checkpoints WHERE source_id=? AND mode='delta' AND status='complete' AND ${scheduledPredicate} ORDER BY coverage_end DESC, completed_at DESC, id DESC LIMIT 1`).bind(sourceId).all<Record<string, unknown>>();
+  return result.results?.[0]?.coverage_end == null ? null : String(result.results[0].coverage_end);
 }
-
-function compactTimestamp(value: Date): string {
-  return value.toISOString().replace(/[^0-9]/g, "");
-}
+function compactTimestamp(value: Date): string { return value.toISOString().replace(/[^0-9]/g, ""); }

@@ -12,6 +12,8 @@ import { mozillaAdapter } from "./adapters/mozilla";
 import { oracleAdapter } from "./adapters/oracle";
 import { atlassianAdapter } from "./adapters/atlassian";
 import { createAppleAdapter } from "./adapters/apple";
+import { createChromeAdapter } from "./adapters/chrome";
+import { createCitrixAdapter } from "./adapters/citrix";
 import { createSapAdapter } from "./adapters/sap";
 import { PRODUCTION_SOURCE_IDS, SOURCE_CATALOG, SOURCE_IDS } from "./source-catalog";
 
@@ -19,6 +21,11 @@ export interface AdapterEnvironment {
   NVD_API_KEY?: string;
   VULNCHECK_API_TOKEN?: string;
   CITRIX_CSAF_URLS?: string;
+  CITRIX_SECURITY_INDEX_URL?: string;
+  CITRIX_SECURITY_SITEMAP_URL?: string;
+  CITRIX_SECURITY_DETAIL_URLS?: string;
+  SAP_SECURITY_INDEX_URL?: string;
+  SAP_SECURITY_DETAIL_URLS?: string;
   CHROME_CSAF_URLS?: string;
   IVANTI_CSAF_URLS?: string;
   BROADCOM_CSAF_URLS?: string;
@@ -47,20 +54,20 @@ export function defaultSourceIds(env: AdapterEnvironment): string[] {
 export function createVendorAdapter(sourceId: string, env: AdapterEnvironment): VendorAdapter | null {
   switch (sourceId) {
     case "red-hat-csaf": return redHatAdapter;
-    case "citrix-configured-csaf": return createConfiguredCsafAdapter({vendor:"citrix",sourceId,urls:parseUrlList(env.CITRIX_CSAF_URLS),allowedHosts:["citrix.com","cloud.com","netscaler.com"],missingConfigurationMessage:"Citrix requires a verified official structured feed."});
-    case "chrome-configured-csaf": return createConfiguredCsafAdapter({vendor:"chrome",sourceId,urls:parseUrlList(env.CHROME_CSAF_URLS),allowedHosts:["google.com","chromium.org"],missingConfigurationMessage:"Chrome requires a verified official structured feed."});
+    case "citrix-configured-csaf": return env.CITRIX_CSAF_URLS ? createConfiguredCsafAdapter({vendor:"citrix",sourceId,urls:parseUrlList(env.CITRIX_CSAF_URLS),allowedHosts:["citrix.com","cloud.com","netscaler.com"],missingConfigurationMessage:"Citrix requires official structured documents."}) : createCitrixAdapter({indexUrl:env.CITRIX_SECURITY_INDEX_URL,sitemapUrl:env.CITRIX_SECURITY_SITEMAP_URL,detailUrls:parseUrlList(env.CITRIX_SECURITY_DETAIL_URLS)});
+    case "chrome-configured-csaf": return createChromeAdapter({csafUrls:parseUrlList(env.CHROME_CSAF_URLS)});
     case "vmware-broadcom-json": return env.BROADCOM_CSAF_URLS ? createConfiguredCsafAdapter({vendor:"vmware-broadcom",sourceId,urls:parseUrlList(env.BROADCOM_CSAF_URLS),allowedHosts:["broadcom.com","vmware.com"],missingConfigurationMessage:"Broadcom requires verified structured documents."}) : broadcomAdapter;
     case "microsoft-msrc-csaf": return microsoftAdapter;
     case "cisco-psirt-csaf": return createCiscoAdapter({ clientId: env.CISCO_CLIENT_ID, clientSecret: env.CISCO_CLIENT_SECRET });
     case "adobe-psirt-csaf": return createAdobeAdapter({ indexUrl: env.ADOBE_SECURITY_INDEX_URL, authorization: env.ADOBE_SECURITY_AUTHORIZATION });
     case "fortinet-psirt-csaf": return createFortinetAdapter({ csafUrlTemplate: env.FORTINET_CSAF_URL_TEMPLATE, authorization: env.FORTINET_CSAF_AUTHORIZATION });
     case "palo-alto-psirt-csaf": return paloAltoAdapter;
-    case "ivanti-security-advisory-rss": return env.IVANTI_CSAF_URLS ? createConfiguredCsafAdapter({vendor:"ivanti",sourceId,urls:parseUrlList(env.IVANTI_CSAF_URLS),allowedHosts:["ivanti.com"],missingConfigurationMessage:"Ivanti requires complete structured input."}) : createIvantiAdapter();
+    case "ivanti-security-advisory-rss": return env.IVANTI_CSAF_URLS ? createConfiguredCsafAdapter({vendor:"ivanti",sourceId,urls:parseUrlList(env.IVANTI_CSAF_URLS),allowedHosts:["ivanti.com"],missingConfigurationMessage:"Ivanti requires complete structured input."}) : createIvantiAdapter({followDetails:true});
     case "mozilla-mfsa-yaml": return mozillaAdapter;
     case "oracle-cpu-csaf": return oracleAdapter;
     case "atlassian-vulnerability-api": return atlassianAdapter;
     case "apple-configured-csaf": return createAppleAdapter({ csafUrls: parseUrlList(env.APPLE_CSAF_URLS), bearerToken: env.APPLE_CSAF_TOKEN });
-    case "sap-configured-csaf": return createSapAdapter({ csafUrls: parseUrlList(env.SAP_CSAF_URLS), bearerToken: env.SAP_CSAF_TOKEN });
+    case "sap-configured-csaf": return createSapAdapter({ csafUrls: parseUrlList(env.SAP_CSAF_URLS), bearerToken: env.SAP_CSAF_TOKEN,htmlIndexUrl:env.SAP_SECURITY_INDEX_URL??"https://support.sap.com/en/my-support/knowledge-base/security-notes-news.html",htmlDetailUrls:parseUrlList(env.SAP_SECURITY_DETAIL_URLS) });
     default: return null;
   }
 }

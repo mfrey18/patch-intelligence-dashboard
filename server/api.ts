@@ -6,7 +6,9 @@ import { queryCveDetail } from "../lib/api/cve-query";
 import { PostgresIngestionRepository, seedIngestionCatalog } from "../lib/ingestion/postgres-repository";
 import { ingestionBatchOutcome, runVendorAdapter } from "../lib/ingestion/pipeline";
 import { createVendorAdapter, SOURCE_IDS, type AdapterEnvironment } from "../lib/ingestion/source-registry";
-import { advanceCheckpoint, checkpointBatchKey, isScheduledCiscoRequest, loadOrCreateCheckpoint, markCheckpointFailed, markCheckpointRunning, validateScheduledScope, type IngestionCheckpoint, type IngestionRequest } from "../lib/ingestion/orchestration";
+import { advanceCheckpoint, checkpointBatchKey, isScheduledSourceRequest, loadOrCreateCheckpoint, markCheckpointFailed, markCheckpointRunning, validateScheduledScope, type IngestionCheckpoint, type IngestionRequest } from "../lib/ingestion/orchestration";
+import { leasedSourceDatabase, runSourceOperation, SourceBudgetExpired, SourceLeaseLost } from "../lib/ingestion/source-execution";
+import { sourceProgress } from "../lib/ingestion/source-completion";
 import { clampBatchSize } from "../lib/ingestion/operational-policy";
 import { ingestCveEnrichment } from "../lib/ingestion/enrichments/cve";
 import { ingestVulnCheck } from "../lib/ingestion/enrichments/vulncheck";
@@ -57,8 +59,13 @@ const worker = {
 
     if (url.pathname === "/api/internal/sources" && request.method === "GET") {
       const error=authorizeInternalRequest(request,env); if(error)return error;
-      const rows=await env.DB.prepare("SELECT id,kind,readiness,enabled FROM sources ORDER BY id").all();
-      return privateJson({sources:rows.results});
+      await seedIngestionCatalog(env.DB);
+      const sources=await sourceProgress(env.DB);
+      return privateJson({sources:sources.map(source=>{
+        let historicalCoverage='unverified';
+        try {historicalCoverage=createVendorAdapter(String(source.id),env)?.historicalCoverage??'unverified';}catch { /* Missing configuration stays explicitly unverified. */ }
+        return {...source,historicalCoverage};
+      })});
     }
     if (url.pathname === "/api/internal/ingest" && request.method === "POST") return handleIngestion(request, env);
     if (url.pathname === "/api/internal/health" && request.method === "GET") return handleInternalHealth(request, env);
@@ -85,12 +92,14 @@ async function handleIngestion(request: Request, env: Env): Promise<Response> {
   if (authError) return authError;
   const length = Number(request.headers.get("content-length") ?? 0);
   if (length > 16_384) return privateJson({ error: "Request body is too large" }, 413);
-  let body: IngestionRequest & { sources?: string[]; idempotencyKey?: string; maxItems?: number; refreshProjection?: boolean };
+  let body: IngestionRequest & { sources?: string[]; idempotencyKey?: string; maxItems?: number; refreshProjection?: boolean; budgetMs?: number; invocationStartedAt?: string };
   try {
     const rawBody = await request.text();
     if (new TextEncoder().encode(rawBody).byteLength > 16_384) return privateJson({ error: "Request body is too large" }, 413);
     body = JSON.parse(rawBody) as typeof body;
   } catch { return privateJson({ error: "Invalid JSON body" }, 400); }
+  if (!body || !Array.isArray(body.sources) || body.sources.some(value=>typeof value!=="string")) return privateJson({error:"sources must be an array of source identifiers"},400);
+  if (body.budgetMs != null && (!Number.isFinite(body.budgetMs) || body.budgetMs<=0)) return privateJson({error:"budgetMs must be positive"},400);
   const requested = [...new Set(body.sources ?? [])];
   if (body.refreshProjection != null && typeof body.refreshProjection !== "boolean") return privateJson({ error: "refreshProjection must be a boolean" }, 400);
   if (body.scheduled != null && typeof body.scheduled !== "boolean") return privateJson({ error: "scheduled must be a boolean" }, 400);
@@ -105,51 +114,91 @@ async function handleIngestion(request: Request, env: Env): Promise<Response> {
 
   const results: unknown[] = [];
   const holder = crypto.randomUUID();
-  const scheduledCisco = isScheduledCiscoRequest(sourceId, body);
-  if (!(await acquireLease(env.DB, sourceId, holder))) return privateJson({ completedAt: new Date().toISOString(), status: scheduledCisco ? "pending" : "partial", results: [{ sourceId, status: scheduledCisco ? "pending" : "skipped", ...(scheduledCisco ? { reason: "Source ingestion is already running" } : { error: "Source ingestion is already running" }) }] }, scheduledCisco ? 202 : 207);
+  const scheduledSource = isScheduledSourceRequest(sourceId, body);
+  if (!(await acquireLease(env.DB, sourceId, holder))) return privateJson({ completedAt: new Date().toISOString(), status: scheduledSource ? "pending" : "partial", results: [{ sourceId, status: scheduledSource ? "pending" : "skipped", ...(scheduledSource ? { reason: "Source ingestion is already running" } : { error: "Source ingestion is already running" }) }] }, scheduledSource ? 202 : 207);
   let checkpoint: IngestionCheckpoint | null = null;
   let shouldRefreshProjection = false;
+  const sourceDb=leasedSourceDatabase(env.DB,sourceId,holder);
+  const budgetMs=Math.max(1,Math.min(body.budgetMs ?? 90_000, 9*60_000));
   try {
-    const readiness=await env.DB.prepare("SELECT readiness,retry_after FROM sources WHERE id=?").bind(sourceId).first<{readiness:string;retry_after:string|null}>();
+    await runSourceOperation(budgetMs,request.signal,async()=>{
+    // Obtaining a new holder fences every previous invocation. Recover its
+    // unfinished batch immediately instead of waiting on the old run's timer.
+    await sourceDb.prepare(`UPDATE source_runs r SET status='partial',completed_at=now(),bound_hit=TRUE,
+      continuation_out=continuation_in,idempotency_key=NULL,
+      records_failed=(SELECT COUNT(*) FROM source_run_results rr WHERE rr.source_run_id=r.id AND rr.status='failed'),
+      error_summary=COALESCE(error_summary,'Interrupted source batch recovered under a new lease')
+      WHERE source_id=? AND status='running'`).bind(sourceId).run();
+    const readiness=await sourceDb.prepare("SELECT readiness,retry_after FROM sources WHERE id=?").bind(sourceId).first<{readiness:string;retry_after:string|null}>();
     if(readiness?.retry_after && Date.parse(readiness.retry_after)>Date.now()) {
-      results.push({ sourceId, status: scheduledCisco ? "pending" : "skipped", reason: "Source cooldown", retryAfter: readiness.retry_after });
+      results.push({ sourceId, status: scheduledSource ? "pending" : "skipped", reason: "Source cooldown", retryAfter: readiness.retry_after });
     } else if(readiness?.readiness==="paused") {
-      results.push({ sourceId, status: scheduledCisco ? "pending" : "skipped", reason: "Source is paused" });
+      results.push({ sourceId, status: scheduledSource ? "pending" : "skipped", reason: "Source is paused" });
     } else {
       const adapter = createVendorAdapter(sourceId, env);
       if (adapter) {
-        checkpoint = await loadOrCreateCheckpoint(env.DB, sourceId, body);
-        if (checkpoint.status === "complete") return privateJson({ completedAt: new Date().toISOString(), status: "success", results: [{ sourceId, status: "unchanged", checkpoint }] });
-        await markCheckpointRunning(env.DB, checkpoint.id);
-        const key = body.idempotencyKey ?? checkpointBatchKey(checkpoint, scheduledCisco ? undefined : body.checkpointId);
-        const result = await runVendorAdapter(adapter, new PostgresIngestionRepository(env.DB), {
+        checkpoint = await loadOrCreateCheckpoint(sourceDb, sourceId, body, new Date(), {historicalCoverage:adapter.historicalCoverage==='complete_index'});
+        if (checkpoint.status === "complete") { results.push({ sourceId, status: "unchanged", checkpoint }); return; }
+        await markCheckpointRunning(sourceDb, checkpoint.id);
+        const key = scheduledSource ? checkpointBatchKey(checkpoint) : body.idempotencyKey ?? checkpointBatchKey(checkpoint, body.checkpointId);
+        const result = await runVendorAdapter(adapter, new PostgresIngestionRepository(sourceDb), {
           since: checkpoint.windowStart, until: checkpoint.windowEnd, idempotencyKey: key,
           mode: checkpoint.mode, continuation: checkpoint.continuation ?? undefined,
-          checkpointId: checkpoint.id, discoveryGeneration: scheduledCisco ? checkpoint.id : body.checkpointId, maxItems: scheduledCisco ? 1 : clampBatchSize(body.maxItems),
+          checkpointId: checkpoint.id, discoveryGeneration: scheduledSource ? checkpoint.id : body.checkpointId, maxItems: scheduledSource ? (["microsoft-msrc-csaf", "palo-alto-psirt-csaf", "mozilla-mfsa-yaml"].includes(sourceId) ? 12 : 1) : clampBatchSize(body.maxItems),
         });
-        const nextCheckpoint = await advanceCheckpoint(env.DB, checkpoint, result);
-        const status = scheduledCisco && nextCheckpoint.status === "pending" && result.counts.failed === 0 && result.status !== "failed" ? "pending" : result.counts.failed > 0 || result.status === "failed" ? "failed" : result.status;
-        const retry = result.counts.failed > 0 ? await env.DB.prepare("SELECT retry_after FROM sources WHERE id=?").bind(sourceId).first<{ retry_after: string | null }>() : null;
+        const nextCheckpoint = await advanceCheckpoint(sourceDb, checkpoint, result, {historicalCoverage:adapter.historicalCoverage==='complete_index'});
+        const status = scheduledSource && nextCheckpoint.status === "pending" && result.counts.failed === 0 && result.status !== "failed" ? "pending" : result.counts.failed > 0 || result.status === "failed" ? "failed" : result.status;
+        const retry = result.counts.failed > 0 ? await sourceDb.prepare("SELECT retry_after FROM sources WHERE id=?").bind(sourceId).first<{ retry_after: string | null }>() : null;
         results.push({ ...result, status, ...(retry?.retry_after ? { retryAfter: retry.retry_after } : {}), checkpoint: nextCheckpoint });
         shouldRefreshProjection = body.refreshProjection !== false && (checkpoint.mode === "delta" || nextCheckpoint.status === "complete");
       } else {
         if (body.mode && body.mode !== "delta") throw new Error(`${sourceId} is a full-snapshot enrichment and only supports delta synchronization`);
-        const key = body.idempotencyKey ?? `${sourceId}:delta:${new Date().toISOString().slice(0, 10)}`;
-        if (sourceId === "cisa-kev") results.push(await ingestCisaKev(env.DB, key));
-        else if (sourceId === "first-epss") results.push(await ingestEpssBulk(env.DB, key));
-        else if (sourceId === "vulncheck-kev") results.push(await ingestVulnCheck(env.DB, env.VULNCHECK_API_TOKEN, key));
-        else if (sourceId === "cve-list-v5" || sourceId === "nvd-cve") results.push(await ingestCveEnrichment(env.DB, sourceId, env.NVD_API_KEY, body.idempotencyKey));
+        const key = body.idempotencyKey ?? (scheduledSource ? `${sourceId}:scheduled:${new Date().toISOString()}` : `${sourceId}:delta:${new Date().toISOString().slice(0, 10)}`);
+        if (sourceId === "cisa-kev") results.push(await ingestCisaKev(sourceDb, key));
+        else if (sourceId === "first-epss") results.push(await ingestEpssBulk(sourceDb, key));
+        else if (sourceId === "vulncheck-kev") results.push(await ingestVulnCheck(sourceDb, env.VULNCHECK_API_TOKEN, key));
+        else if (sourceId === "cve-list-v5" || sourceId === "nvd-cve") results.push(await ingestCveEnrichment(sourceDb, sourceId, env.NVD_API_KEY, scheduledSource ? undefined : body.idempotencyKey));
         else throw new Error("Source has no usable adapter");
         shouldRefreshProjection = body.refreshProjection !== false;
       }
     }
+    });
   } catch (error) {
     const message = safeError(error);
-    if (checkpoint) await markCheckpointFailed(env.DB, checkpoint.id, message);
-    const retry = await env.DB.prepare("SELECT retry_after FROM sources WHERE id=?").bind(sourceId).first<{ retry_after: string | null }>();
-    results.push({ sourceId, status: "failed", error: message, ...(retry?.retry_after ? { retryAfter: retry.retry_after } : {}) });
+    const interruptedCheckpoint=checkpoint as IngestionCheckpoint | null;
+    if (error instanceof SourceBudgetExpired || error instanceof SourceLeaseLost) {
+      // Release interrupted idempotency claims without losing completed item writes.
+      // This cleanup is itself fenced; a new holder must never be overwritten.
+      let interruptedFailures=0;
+      try { await sourceDb.transaction(async tx=>{
+        const interrupted=await tx.prepare(`UPDATE source_runs r SET status='partial',completed_at=now(),bound_hit=TRUE,
+          continuation_out=continuation_in,idempotency_key=NULL,error_summary=?,
+          records_failed=(SELECT COUNT(*) FROM source_run_results rr WHERE rr.source_run_id=r.id AND rr.status='failed')
+          WHERE source_id=? AND status='running' RETURNING records_failed`).bind(message,sourceId).all<{records_failed:number}>();
+        interruptedFailures=interrupted.results.reduce((total,row)=>total+Number(row.records_failed),0);
+        if(interruptedCheckpoint) await tx.prepare("UPDATE ingestion_checkpoints SET status=?,updated_at=now() WHERE id=? AND status='running'").bind(interruptedFailures?'failed':'pending',interruptedCheckpoint.id).run();
+      }); } catch { /* the replacement lease holder owns recovery */ }
+      results.push({sourceId,status:interruptedFailures?'failed':'pending',reason:message,counts:{failed:interruptedFailures},...(interruptedCheckpoint?{checkpoint:{...interruptedCheckpoint,status:interruptedFailures?'failed':'pending'}}:{})});
+    } else {
+      if (interruptedCheckpoint) { try { await markCheckpointFailed(sourceDb, interruptedCheckpoint.id, message); } catch { /* lease fencing takes precedence */ } }
+      const retry = await env.DB.prepare("SELECT retry_after FROM sources WHERE id=?").bind(sourceId).first<{ retry_after: string | null }>();
+      results.push({ sourceId, status: "failed", error: message, ...(retry?.retry_after ? { retryAfter: retry.retry_after } : {}) });
+    }
   } finally {
     await releaseLease(env.DB, sourceId, holder);
+  }
+  if (scheduledSource && results.length) {
+    const run=results[0] as {status:string;counts?:{failed?:number};boundHit?:boolean;continuation?:string;retryAfter?:string;checkpoint?:IngestionCheckpoint;progress?:unknown};
+    const state=(await sourceProgress(env.DB,sourceId))[0] as Record<string,unknown> | undefined;
+    const complete=await env.DB.prepare("SELECT owner_id,coverage_end,completed_at FROM source_completion_evidence WHERE source_id=? AND kind IN ('delta','initial_enrichment') ORDER BY coverage_end DESC,completed_at DESC LIMIT 1").bind(sourceId).first<{owner_id:string;coverage_end:string;completed_at:string}>();
+    const failed=run.status==='failed'||Boolean(run.counts?.failed);
+    const pending=!failed && (run.status==='pending'||run.status==='skipped'||run.boundHit||run.checkpoint?.status==='pending'||run.checkpoint?.status==='running'||Boolean(state?.enrichment_cycle_id)||(!run.checkpoint&&!complete));
+    run.progress={state:failed?'failed':pending?'pending':complete?'complete':'pending',
+      ownerId:run.checkpoint?.id??state?.enrichment_cycle_id??complete?.owner_id??null,
+      position:run.checkpoint ? `${run.checkpoint.id}:${run.checkpoint.windowStart}:${run.checkpoint.continuation??'start'}:${run.checkpoint.status}` : run.continuation??null,
+      coverageEnd:run.checkpoint?.coverageEnd??complete?.coverage_end??null,
+      retryAt:run.retryAfter??state?.retry_after??null};
+    if(pending && run.status!=='failed')run.status='pending';
   }
   const outcome = ingestionBatchOutcome(results);
   let projection: unknown = null;

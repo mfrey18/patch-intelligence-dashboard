@@ -25,6 +25,7 @@
     "test:unit": "node --import tsx --test --test-isolation=none tests/*.test.mjs"
   },
   "dependencies": {
+    "cheerio": "1.2.0",
     "drizzle-orm": "0.45.2",
     "pg": "^8.23.0",
     "react": "19.2.6",

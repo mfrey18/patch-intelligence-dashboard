@@ -36,6 +36,7 @@ export interface ParsedMozillaMfsa {
 }
 
 export const mozillaAdapter: VendorAdapter = {
+  historicalCoverage: "complete_index",
   vendor: "mozilla",
   sourceId: "mozilla-mfsa-yaml",
   async discover(ctx) {

@@ -29,6 +29,7 @@ export function createCiscoAdapter(credentials: CiscoCredentials = {}, runtime: 
   };
 
   return {
+    historicalCoverage: "complete_index",
     vendor: "cisco",
     sourceId: "cisco-psirt-csaf",
     async discover(ctx) {

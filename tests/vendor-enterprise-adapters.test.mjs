@@ -70,8 +70,8 @@ test("Oracle CSPU normalization creates a distinct reusable release event", () =
   assert.match(advisory.releaseEvent.label, /Critical Security Patch Update/);
 });
 
-test("Apple and SAP default adapters fail closed until authoritative feeds are configured", async () => {
-  await assert.rejects(() => createAppleAdapter().discover({ fetch, policy }), /verified public machine-readable/);
+test("Apple default HTML path fails closed on an unrecognized shell while SAP still requires configured input", async () => {
+  await assert.rejects(() => createAppleAdapter().discover({ fetch: async () => new Response("<main><h1>Apple shell</h1></main>"), policy }), /no identifiable security advisories/);
   await assert.rejects(() => createSapAdapter().discover({ fetch, policy }), /SAP for Me entitlement/);
   assert.throws(() => createAppleAdapter({ csafUrls: ["https://example.com/advisory.json"] }), /not an approved/);
   assert.throws(() => createSapAdapter({ csafUrls: ["http://support.sap.com/advisory.json"] }), /not an approved/);

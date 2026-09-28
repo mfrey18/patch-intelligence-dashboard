@@ -10,6 +10,15 @@ export const BACKFILL_WINDOW_DAYS = 1;
 export const REPLAY_WINDOW_DAYS = 1;
 export const PATCH_TUESDAY_WINDOW_DAYS = 1;
 export const SOURCE_WINDOW_DAYS: Readonly<Record<string, number>> = Object.freeze({
+  // Full-index vendors freeze discovery once; advisory batches provide the bound.
+  "red-hat-csaf": 186,
+  "adobe-psirt-csaf": 186,
+  "fortinet-psirt-csaf": 186,
+  "ivanti-security-advisory-rss": 186,
+  "apple-configured-csaf": 186,
+  "sap-configured-csaf": 186,
+  "citrix-configured-csaf": 186,
+  "chrome-configured-csaf": 186,
   "oracle-cpu-csaf": 186,
   "vmware-broadcom-json": 186,
   "atlassian-vulnerability-api": 186,

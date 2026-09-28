@@ -1,6 +1,6 @@
 # Feed access and credentials
 
-Verified 2026-09-17. These are server-side ingestion settings. Adding a vendor account does not establish that its public advisory feed has complete structured data.
+Verified 2026-09-28. These are server-side ingestion settings. Official HTML is an approved input alongside structured vendor feeds. Adding an account does not establish complete historical coverage or explicit remediation data.
 
 ## Credentials to obtain
 
@@ -33,23 +33,29 @@ The existing, operator-readable `/Library/PatchIntelligence/secrets/github-setup
 
 After restart, validate one private `vulncheck-kev` delta batch and inspect its run result and attribution. For NVD, validate a bounded `nvd-cve` batch. Do not promote either source merely because a credential is present; queue completion and distinct-day validation gates still apply.
 
-## Sources needing feeds rather than a generic API key
+## Sources with optional structured overrides or access gates
 
 | Vendor | Verified public source / next step | Configuration only after verification |
 | --- | --- | --- |
-| Broadcom | [Official JSON API instructions](https://knowledge.broadcom.com/external/article/408302/json-api-for-product-security-advisories.html). The POST endpoint now works without credentials. Its index truncates product names and omits fixed versions, so the adapter records advisory/CVE identity only and coverage remains gated. | Optional `BROADCOM_CSAF_URLS` override for complete official CSAF documents |
+| Broadcom | [Official JSON API instructions](https://knowledge.broadcom.com/external/article/408302/json-api-for-product-security-advisories.html). The POST endpoint works without credentials. The adapter follows each official detail link and records only explicit product/fix relationships; the index alone does not provide them. | Optional `BROADCOM_CSAF_URLS` override for official structured documents |
 | Adobe | [Security bulletins](https://www.adobe.com/trust/security.html). No complete official structured endpoint was verified in this pass. | `ADOBE_SECURITY_INDEX_URL`, optional vendor-provided `ADOBE_SECURITY_AUTHORIZATION` |
-| Fortinet | [FortiGuard PSIRT](https://www.fortiguard.com/psirt). RSS discovery alone does not establish complete remediation mappings. Confirm an accessible official structured export. | `FORTINET_CSAF_URL_TEMPLATE`, optional vendor-provided `FORTINET_CSAF_AUTHORIZATION` |
-| Ivanti | Public advisory discovery remains incomplete; obtain a verified structured source. | `IVANTI_CSAF_URLS` |
+| Fortinet | [FortiGuard PSIRT](https://www.fortiguard.com/psirt). The default adapter traverses the public PSIRT HTML index and detail pages; a configured CSAF template remains an optional override. | `FORTINET_CSAF_URL_TEMPLATE`, optional vendor-provided `FORTINET_CSAF_AUTHORIZATION` |
+| Ivanti | The default adapter uses the public security-advisory RSS for discovery and follows each linked official support advisory. A structured override is optional; complete RSS history and detail mappings still require validation. | `IVANTI_CSAF_URLS` |
 | Apple | [Apple security releases](https://support.apple.com/100100) are public. No complete CSAF source was verified. | `APPLE_CSAF_URLS`; `APPLE_CSAF_TOKEN` is an adapter option, not evidence that Apple offers a token service |
-| SAP | [SAP Security Notes](https://support.sap.com/en/my-support/knowledge-base/security-notes-news.html). Ask the organization's SAP administrator to establish appropriate support access and an authorized machine-readable export. | `SAP_CSAF_URLS`; `SAP_CSAF_TOKEN` requires a verified feed-specific authentication mechanism |
-| Citrix / NetScaler | [Security bulletin notifications](https://www.citrix.com/blogs/2020/06/16/keep-up-to-date-with-the-citrix-trust-center/) provide discovery. Full structured product/fix coverage still needs verification. | `CITRIX_CSAF_URLS` |
-| Chrome | [Official release blog](https://chromereleases.googleblog.com/) is public; the current adapter requires verified structured documents. A Google account key does not supply those documents. | `CHROME_CSAF_URLS` |
+| SAP | [SAP Security Notes](https://support.sap.com/en/my-support/knowledge-base/security-notes-news.html). The public monthly index and archive expose note links, but note details require existing SAP for Me entitlement. | `SAP_SECURITY_INDEX_URL`, `SAP_SECURITY_DETAIL_URLS`, or optional `SAP_CSAF_URLS` / `SAP_CSAF_TOKEN` |
+| Citrix / NetScaler | [Official sitemap](https://support.citrix.com/sitemap.xml) and bulletin pages provide public discovery and HTML detail parsing. The sitemap's complete historical bulletin coverage still requires validation. | `CITRIX_SECURITY_SITEMAP_URL`, `CITRIX_SECURITY_INDEX_URL`, `CITRIX_SECURITY_DETAIL_URLS`, or optional `CITRIX_CSAF_URLS` |
+| Chrome | [Official release blog](https://chromereleases.googleblog.com/) is public and the adapter follows release posts; structured documents remain an optional override. | `CHROME_CSAF_URLS` |
 
 Configured URLs must be official allowed HTTPS hosts. Existing placeholder environment variables are not proof that a vendor sells or supplies such a feed. Do not put portal passwords or browser cookies in these variables.
 
 ## Resuming bounded updates
 
-`scripts/sync-expansion.mjs` accepts `SOURCE_ID`, `INGEST_MODE`, `CHECKPOINT_ID`, `MAX_ATTEMPTS` (1–50) and `BATCH_SIZE` (1–12; default 1). Its `API_ORIGIN` must point to the private API and `INGEST_SECRET` must be supplied through the operator environment, never printed.
+`scripts/sync-expansion.mjs` accepts `SOURCE_ID`, `INGEST_MODE`, `CHECKPOINT_ID`, `MAX_ATTEMPTS` (1–50), `SOURCE_MAX_DURATION_MS` (default 600000), and optional `SINCE`/`UNTIL`; vendor batches contain one advisory. Its `API_ORIGIN` must point to the private API and `INGEST_SECRET` must be supplied through the operator environment, never printed.
 
 Use the same explicit checkpoint ID across sessions to resume historical work. A validation run does not enable automatic production scheduling. Source readiness stays independent of the most recent successful batch.
+
+## Official HTML paths
+
+Public HTML adapters retain the original source IDs and preserve configured CSAF overrides. Broadcom follows its official JSON index to HTML details; Fortinet follows the PSIRT HTML index; Ivanti follows RSS links to individual support advisories; Citrix traverses the official sitemap; SAP traverses public monthly/archive pages and fetches entitled notes. Citrix supports `CITRIX_SECURITY_INDEX_URL`, `CITRIX_SECURITY_SITEMAP_URL`, and `CITRIX_SECURITY_DETAIL_URLS`; SAP supports `SAP_SECURITY_INDEX_URL` and `SAP_SECURITY_DETAIL_URLS`. Explicit detail lists are useful for validation but cannot prove a six-month backfill. No portal password, browser cookie, paid subscription, or invented token service is required or introduced.
+
+Adobe, Apple, Chrome, Fortinet, Broadcom and Ivanti use public official pages where available. Public indexes and details still undergo completeness and provenance validation before promotion. SAP detailed notes remain dependent on existing authorized access. VulnCheck still requires the free Community token; NVD works without a key at its existing slower pace.

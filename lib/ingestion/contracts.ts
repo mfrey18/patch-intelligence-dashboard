@@ -42,6 +42,8 @@ export interface RunMetadata {
 }
 
 export interface VendorAdapter {
+  /** Complete official historical discovery, not just an operator-supplied subset of documents. */
+  historicalCoverage?: "complete_index" | "configured_subset";
   vendor: VendorId;
   sourceId: string;
   discover(ctx: DiscoveryContext): Promise<AdvisoryRef[]>;

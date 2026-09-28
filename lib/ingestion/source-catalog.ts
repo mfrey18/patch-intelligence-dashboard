@@ -13,19 +13,19 @@ export interface SourceCatalogEntry {
 export const SOURCE_CATALOG = [
   { id: "microsoft-msrc-csaf", vendorId: "microsoft", name: "Microsoft MSRC CSAF", kind: "vendor_advisory", discoveryUrl: "https://api.msrc.microsoft.com/csaf/advisories/changes.csv" },
   { id: "cisco-psirt-csaf", vendorId: "cisco", name: "Cisco PSIRT OpenVuln + CSAF", kind: "vendor_advisory", discoveryUrl: "https://apix.cisco.com/security/advisories/v2/all/lastpublished", requiresConfiguration: true },
-  { id: "adobe-psirt-csaf", vendorId: "adobe", name: "Adobe PSIRT configured CSAF", kind: "vendor_advisory", discoveryUrl: "https://helpx.adobe.com/security.html", requiresConfiguration: true },
-  { id: "fortinet-psirt-csaf", vendorId: "fortinet", name: "Fortinet PSIRT RSS + configured CSAF", kind: "vendor_advisory", discoveryUrl: "https://filestore.fortinet.com/fortiguard/rss/ir.xml", requiresConfiguration: true },
+  { id: "adobe-psirt-csaf", vendorId: "adobe", name: "Adobe security bulletins", kind: "vendor_advisory", discoveryUrl: "https://helpx.adobe.com/security.html" },
+  { id: "fortinet-psirt-csaf", vendorId: "fortinet", name: "Fortinet PSIRT advisories", kind: "vendor_advisory", discoveryUrl: "https://filestore.fortinet.com/fortiguard/rss/ir.xml" },
   { id: "palo-alto-psirt-csaf", vendorId: "palo-alto", name: "Palo Alto Networks PSIRT CSAF", kind: "vendor_advisory", discoveryUrl: "https://security.paloaltonetworks.com/rss.xml" },
   { id: "ivanti-security-advisory-rss", vendorId: "ivanti", name: "Ivanti Security Advisory RSS", kind: "vendor_advisory", discoveryUrl: "https://www.ivanti.com/blog/topics/security-advisory/rss" },
   { id: "mozilla-mfsa-yaml", vendorId: "mozilla", name: "Mozilla Foundation Security Advisories", kind: "vendor_advisory", discoveryUrl: "https://api.github.com/repos/mozilla/foundation-security-advisories/contents/announce" },
   { id: "oracle-cpu-csaf", vendorId: "oracle", name: "Oracle CPU + CSPU CSAF", kind: "vendor_advisory", discoveryUrl: "https://www.oracle.com/a/tech/docs/security-alerts/" },
   { id: "atlassian-vulnerability-api", vendorId: "atlassian", name: "Atlassian Vulnerability API", kind: "vendor_advisory", discoveryUrl: "https://api.atlassian.com/vuln-transparency/v1/cves" },
-  { id: "apple-configured-csaf", vendorId: "apple", name: "Apple configured CSAF", kind: "vendor_advisory", discoveryUrl: "https://support.apple.com/100100", requiresConfiguration: true },
+  { id: "apple-configured-csaf", vendorId: "apple", name: "Apple security releases", kind: "vendor_advisory", discoveryUrl: "https://support.apple.com/100100" },
   { id: "sap-configured-csaf", vendorId: "sap", name: "SAP entitled configured CSAF", kind: "vendor_advisory", discoveryUrl: "https://support.sap.com/en/my-support/knowledge-base/security-notes-news.html", requiresConfiguration: true },
   { id: "red-hat-csaf", vendorId: "red-hat", name: "Red Hat CSAF/VEX", kind: "vendor_advisory", discoveryUrl: "https://security.access.redhat.com/data/csaf/v2/advisories/changes.csv" },
   { id: "vmware-broadcom-json", vendorId: "vmware-broadcom", name: "VMware / Broadcom", kind: "vendor_advisory", discoveryUrl: "https://support.broadcom.com/web/ecx/security-advisory/-/securityadvisory/getSecurityAdvisoryList" },
-  { id: "citrix-configured-csaf", vendorId: "citrix", name: "Citrix configured CSAF", kind: "vendor_advisory", discoveryUrl: "https://support.citrix.com/securitybulletins", requiresConfiguration: true },
-  { id: "chrome-configured-csaf", vendorId: "chrome", name: "Chrome configured CSAF", kind: "vendor_advisory", discoveryUrl: "https://chromereleases.googleblog.com", requiresConfiguration: true },
+  { id: "citrix-configured-csaf", vendorId: "citrix", name: "Citrix / NetScaler security bulletins", kind: "vendor_advisory", discoveryUrl: "https://support.citrix.com/securitybulletins" },
+  { id: "chrome-configured-csaf", vendorId: "chrome", name: "Chrome Stable security releases", kind: "vendor_advisory", discoveryUrl: "https://chromereleases.googleblog.com" },
   { id: "cve-list-v5", vendorId: null, name: "CVE Program records", kind: "cve_enrichment", discoveryUrl: "https://github.com/CVEProject/cvelistV5" },
   { id: "nvd-cve", vendorId: null, name: "NVD CVE enrichment", kind: "cve_enrichment", discoveryUrl: "https://services.nvd.nist.gov/rest/json/cves/2.0" },
   { id: "vulncheck-kev", vendorId: null, name: "VulnCheck KEV", kind: "exploitation_snapshot", discoveryUrl: "https://api.vulncheck.com/v3/backup/vulncheck-kev", requiresConfiguration: true },
@@ -42,6 +42,7 @@ export type SourceReadiness = "pending_feed" | "pending_credentials" | "validati
 export function initialReadiness(id: string): {state: SourceReadiness; reason: string | null} {
   if ((PRODUCTION_SOURCE_IDS as readonly string[]).includes(id)) return {state:"production",reason:null};
   if (id === "vulncheck-kev") return {state:"pending_credentials",reason:"Requires a VulnCheck Community API token and source validation."};
-  if (["adobe-psirt-csaf","fortinet-psirt-csaf","ivanti-security-advisory-rss","apple-configured-csaf","sap-configured-csaf","citrix-configured-csaf","chrome-configured-csaf","vmware-broadcom-json"].includes(id)) return {state:"pending_feed",reason:"Awaiting a verified complete official structured feed and bounded replay; no production coverage claimed."};
+  if (id === "sap-configured-csaf") return {state:"pending_credentials",reason:"Public SAP discovery is available; detailed Security Notes require verified existing entitlement or an official configured export."};
+  if (["adobe-psirt-csaf","fortinet-psirt-csaf","ivanti-security-advisory-rss","apple-configured-csaf","sap-configured-csaf","citrix-configured-csaf","chrome-configured-csaf","vmware-broadcom-json"].includes(id)) return {state:"pending_feed",reason:"Official adapter available; complete historical discovery, representative details, and bounded replay must be validated before production coverage is claimed."};
   return {state:"validating",reason:"Adapter available; production replay and scheduled-cycle validation required."};
 }
