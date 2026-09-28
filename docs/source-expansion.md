@@ -61,3 +61,11 @@ Budget expiry and persisted cooldowns report `pending`, preserve durable progres
 Official HTML uses vendor-specific parsers and bounded, allowlisted retrieval. Configured document lists are subsets, not historical coverage proof. `historicalCoverage` in the private source catalog explains whether an adapter supports verified full-index traversal; it does not enable the source. The source's readiness reason, cooldown, completed coverage and active checkpoint/queue are also available there.
 
 Architecture alternatives and the synthesis are recorded in [source-ingestion-architecture.md](source-ingestion-architecture.md).
+
+## September 2026 deployment verification
+
+The completion migration can expose unfinished legacy scheduled checkpoints that were previously hidden by newer successful batches. At the September 28 cutover, Microsoft still had September 17, September 19, and September 23 daily checkpoints at `offset:600`. The new runner resumed their original windows and frozen discovery, rather than treating newer completed coverage as proof that the older work had finished.
+
+If the post-migration monitor reports this backlog, run the bounded daily runner for the affected source, preserving its default scheduled mode. Repeat bounded invocations while progress continues, then refresh the dashboard projection and recheck the private monitor. Do not delete checkpoints, synthesize completion certificates, or weaken the age alert to pass deployment.
+
+Application readiness and the final cutover gate are separate steps. A failed cutover gate may leave the new application running after a successful migration and local readiness check. Check the deployed SHA before recovery. The installed deployment helper treats release directories as immutable; retrying deployment of an already-installed SHA is not a substitute for resolving the operational gate.
